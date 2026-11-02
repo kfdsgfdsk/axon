@@ -1,0 +1,12 @@
+node_modules/
+dist/
+logs/
+*.log
+.git/
+coverage/
+.vscode/
+# Never bake host secrets into the image; the entrypoint generates/persists
+# container secrets in /data on first boot.
+.env
+.env.*
+tests/

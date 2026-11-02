@@ -1,0 +1,933 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         String   @default("user") // user | admin
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Profile / verification
+  emailVerifiedAt   DateTime?
+  phone             String?
+  phoneVerifiedAt   DateTime?
+  passwordChangedAt DateTime?
+
+  // 2FA
+  twoFactorEnabled     Boolean   @default(false)
+  twoFactorMethod      String? // totp | email | sms
+  totpSecretEnc        String?
+  totpSecretIv         String?
+  totpSecretTag        String?
+  backupCodesHash      String[]  @default([])
+  twoFactorLockedUntil DateTime?
+  failed2faAttempts    Int       @default(0)
+  /// Password / login brute-force protection (per-account)
+  failedLoginAttempts  Int       @default(0)
+  loginLockedUntil     DateTime?
+  /// Last successfully accepted TOTP time-step (counter) to prevent replay
+  lastTotpStep         BigInt?
+
+  depositAddresses       DepositAddress[]
+  deposits               Deposit[]
+  refreshTokens          RefreshToken[]
+  balances               Balance[]
+  withdrawals            Withdrawal[]
+  tradeOrders            TradeOrder[]
+  emergencyProtection    EmergencyProtection?
+  beginnerPositions      BeginnerPosition[]
+  sessions               Session[]
+  trustedDevices         TrustedDevice[]
+  withdrawalAddresses    WithdrawalAddress[]
+  twoFactorAudits        TwoFactorAudit[]
+  passwordResetTokens    PasswordResetToken[]
+  emailVerifyTokens      EmailVerifyToken[]
+  idempotencyRecords     IdempotencyRecord[]
+  agentKeys              AgentKey[]
+  agentActions           AgentAction[]
+  agentAuditEvents       AgentAuditEvent[]
+  agentTranscriptEntries AgentTranscriptEntry[]
+}
+
+/// Supported fungible tokens (ERC-20 / SPL). Admin-managed; seed via script.
+/// id is stable slug: "{symbolLower}-{networkId}" e.g. "usdt-ethereum"
+model Token {
+  id                  String   @id // e.g. "usdt-ethereum"
+  symbol              String
+  name                String
+  networkId           String
+  /// ERC-20 contract or SPL mint (normalized: EVM lowercased). Immutable once set.
+  contractAddress     String
+  decimals            Int
+  /// "erc20" | "spl" | "trc20"
+  standard            String
+  isActive            Boolean  @default(true)
+  /// Fee-on-transfer / deflationary tokens deliver less than Transfer log value.
+  /// Prefer leaving inactive for deposits; if true, credit path must use
+  /// balance delta (never full log amount).
+  isFeeOnTransfer     Boolean  @default(false)
+  /// Admin-declared stablecoin (priced ~$1). Never inferred from on-chain symbol().
+  isStable            Boolean  @default(false)
+  /// Admin who registered the token — another admin must activate (two-admin control).
+  registeredByAdminId String?
+  /// Min / max / fee overrides (optional; fall back to network defaults)
+  minWithdraw         Decimal? @db.Decimal(36, 18)
+  maxWithdraw         Decimal? @db.Decimal(36, 18)
+  withdrawFee         Decimal? @db.Decimal(36, 18)
+  coingeckoId         String?
+  /// Binance spot symbol (e.g. "LINKUSDT") for the fast WS/REST price path.
+  /// Null = priced via CoinGecko/Pyth only (slower). Admin-set metadata.
+  binanceSymbol       String?
+  logoUrl             String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([networkId, contractAddress])
+  @@index([networkId, isActive])
+  @@index([symbol])
+  @@index([isActive])
+  @@index([isStable])
+}
+
+/// Dual-control proposals for sensitive token mutations (S-C2).
+/// Activation (false→true) and limits/fee changes require a distinct checker.
+/// Deactivation is single-admin (safe direction) and cancels pendings.
+/// Apply with `npx prisma db push` (repo uses push, no migrations dir).
+model TokenChangeProposal {
+  id           String   @id @default(cuid())
+  tokenId      String
+  /// "activation" | "limits"
+  kind         String
+  /// For limits: { minWithdraw?, maxWithdraw?, withdrawFee?, isFeeOnTransfer? }
+  payload      Json     @default("{}")
+  makerAdminId String
+  /// PENDING | APPLIED | CANCELLED
+  status       String   @default("PENDING")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([tokenId, kind, status])
+  @@index([status, createdAt])
+}
+
+/// One row per address family (evm, bitcoin, solana, ...) — atomic next index
+model DerivationCounter {
+  id            String   @id @default(cuid())
+  addressFamily String   @unique // 'evm' | 'bitcoin' | 'solana' | 'tron'
+  nextIndex     Int      @default(0)
+  updatedAt     DateTime @updatedAt
+}
+
+/// Persisted deposit-scan cursor per network (block number or slot).
+/// Advanced only after a successful scan batch so restarts do not re-scan
+/// unbounded history or skip blocks.
+model ScanCursor {
+  id               String   @id @default(cuid())
+  networkId        String   @unique
+  /// Last successfully scanned block (EVM/Tron) or slot (Solana)
+  lastScannedBlock BigInt   @default(0)
+  updatedAt        DateTime @updatedAt
+}
+
+/// Encrypted master seed metadata (ciphertext never leaves this row / secrets)
+model WalletVault {
+  id                String   @id @default(cuid())
+  /// AES-256-GCM ciphertext of the BIP39 mnemonic (base64)
+  encryptedMnemonic String
+  /// IV (base64)
+  iv                String
+  /// Auth tag (base64)
+  authTag           String
+  /// Optional key version for rotation
+  keyVersion        Int      @default(1)
+  /// KMS-wrapped DEK (base64) when using envelope encryption
+  encryptedDek      String?
+  /// KMS key id / alias used to wrap the DEK
+  kmsKeyId          String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+enum DepositAddressStatus {
+  AWAITING_DEPOSIT
+  CONFIRMING
+  CREDITED
+  EXPIRED
+  CANCELLED
+}
+
+enum WebhookRegistrationStatus {
+  PENDING
+  REGISTERED
+  FAILED
+  DEREGISTERED
+}
+
+model DepositAddress {
+  id                        String                    @id @default(cuid())
+  userId                    String
+  networkId                 String // e.g. 'ethereum', 'bitcoin'
+  addressFamily             String // 'evm' | 'bitcoin' | ...
+  address                   String
+  derivationPath            String
+  derivationIndex           Int
+  isActive                  Boolean                   @default(true)
+  status                    DepositAddressStatus      @default(AWAITING_DEPOSIT)
+  expiresAt                 DateTime?
+  lastCheckedAt             DateTime?
+  /// Last native on-chain balance observed by balance-poll (atomic string).
+  /// Used so excess detection survives sweeps (do not compare to lifetime credits).
+  lastSeenBalanceRaw        String?
+  /// Alchemy / Helius address-activity registration state (best-effort; never blocks issuance)
+  webhookRegistrationStatus WebhookRegistrationStatus @default(PENDING)
+  webhookRegisteredAt       DateTime?
+  webhookLastError          String?
+  createdAt                 DateTime                  @default(now())
+  updatedAt                 DateTime                  @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id])
+  deposits Deposit[]
+
+  // Every deposit address is unique:
+  // - one row per (user, network)
+  // - the address string itself is globally unique within its family
+  //   (no sharing across EVM L2s — each network gets its own derived address)
+  @@unique([userId, networkId])
+  @@unique([addressFamily, address])
+  @@index([address])
+  @@index([userId])
+  @@index([networkId])
+  @@index([isActive, status])
+  @@index([expiresAt])
+  @@index([webhookRegistrationStatus])
+}
+
+enum DepositStatus {
+  PENDING
+  CONFIRMING
+  CREDITED
+  FAILED
+}
+
+/// USER = ordinary user deposit (auto-credit eligible once confirmed).
+/// INTERNAL = from platform-controlled address (hot/cold/swap-receive); never auto-credited.
+enum DepositClassification {
+  USER
+  INTERNAL
+}
+
+model Deposit {
+  id                String                @id @default(cuid())
+  userId            String
+  depositAddressId  String
+  networkId         String
+  /// "" = native asset; otherwise token id from tokens config (e.g. "usdt-ethereum")
+  tokenId           String                @default("")
+  /// ERC-20 contract or SPL mint (denormalized for indexing); null/empty for native
+  tokenContract     String?
+  txHash            String
+  /// Canonical on-chain transfer index (see transferIdentity.ts). EVM logIndex,
+  /// BTC vout, Solana always 0 (aggregated), Tron contract index or 0.
+  transferIndex     Int                   @default(0)
+  fromAddress       String?
+  amount            String // human-readable decimal string
+  amountRaw         String // integer string in smallest unit
+  /// Optional: Transfer log amount before fee-on-transfer deduction (audit)
+  logAmountRaw      String?
+  confirmations     Int                   @default(0)
+  requiredConf      Int
+  status            DepositStatus         @default(PENDING)
+  classification    DepositClassification @default(USER)
+  blockNumber       BigInt?
+  detectedAt        DateTime              @default(now())
+  creditedAt        DateTime?
+  /// Set true once balance ledger has been credited (idempotent)
+  balanceCredited   Boolean               @default(false)
+  /// Dual-control credit for synthetics / INTERNAL (two distinct admins)
+  creditProposedBy  String?
+  creditProposedAt  DateTime?
+  creditConfirmedBy String?
+  creditConfirmedAt DateTime?
+  rawPayload        Json?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  user           User           @relation(fields: [userId], references: [id])
+  depositAddress DepositAddress @relation(fields: [depositAddressId], references: [id])
+
+  /// One row per distinct on-chain transfer: same tx can pay multiple addresses
+  /// or emit multiple Transfer logs for the same token.
+  @@unique([networkId, txHash, tokenId, depositAddressId, transferIndex])
+  @@index([userId])
+  @@index([status])
+  @@index([depositAddressId])
+  @@index([balanceCredited, status])
+  @@index([tokenId])
+  @@index([tokenContract])
+  @@index([networkId, txHash, tokenId])
+  @@index([classification, status])
+}
+
+/// User available / locked balances per network + asset
+/// tokenId "" = native currency of the network
+model Balance {
+  id        String   @id @default(cuid())
+  userId    String
+  networkId String
+  /// "" = native; otherwise token id (e.g. "usdt-solana")
+  tokenId   String   @default("")
+  available Decimal  @default(0) @db.Decimal(36, 18)
+  locked    Decimal  @default(0) @db.Decimal(36, 18)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, networkId, tokenId])
+  @@index([userId])
+  @@index([tokenId])
+}
+
+enum WithdrawalStatus {
+  PENDING_REVIEW
+  APPROVED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REJECTED
+}
+
+model Withdrawal {
+  id             String           @id @default(cuid())
+  userId         String
+  networkId      String
+  /// "" = native asset; otherwise token id
+  tokenId        String           @default("")
+  toAddress      String
+  /// Human-readable amount (same units as Balance)
+  amount         Decimal          @db.Decimal(36, 18)
+  fee            Decimal          @default(0) @db.Decimal(36, 18)
+  /// Total debited from available = amount + fee
+  totalDebited   Decimal          @db.Decimal(36, 18)
+  status         WithdrawalStatus @default(PENDING_REVIEW)
+  txHash         String?
+  failureReason  String?
+  idempotencyKey String?          @unique
+  requestedIp    String?
+  userAgent      String?
+  /// Admin who approved / rejected
+  reviewedBy     String?
+  reviewedAt     DateTime?
+  processedAt    DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@index([status])
+  @@index([networkId])
+  @@index([tokenId])
+  @@index([createdAt])
+}
+
+/// Hashed refresh tokens (long-lived sessions)
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Blacklisted JWT access-token JTIs until natural expiry (used when Redis is unavailable)
+model TokenBlacklist {
+  id        String   @id @default(cuid())
+  jti       String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
+enum TradeOrderType {
+  MARKET_SWAP
+  TAKE_PROFIT
+  STOP_LOSS
+  EMERGENCY_EXIT
+  /// Platform-sourced exit leg for agency beginner positions (R4). The user
+  /// escrow was already burned by closeAgencyLong in the CLOSING-claim tx, so
+  /// lockedAmount is 0 and the swap spends fromAmount from the hot wallet.
+  /// Settles by crediting proceeds only (no burn); fails without unlock.
+  AGENCY_EXIT
+}
+
+enum TradeOrderStatus {
+  PENDING_QUOTE
+  OPEN
+  TRIGGERED
+  EXECUTING
+  COMPLETED
+  FAILED
+  CANCELLED
+  EXPIRED
+}
+
+/// User trade / conditional exit order
+model TradeOrder {
+  id     String           @id @default(cuid())
+  userId String
+  type   TradeOrderType
+  status TradeOrderStatus @default(OPEN)
+
+  /// Source asset
+  fromNetworkId String
+  fromTokenId   String  @default("") // "" = native
+  fromAmount    Decimal @db.Decimal(36, 18)
+
+  /// Destination asset
+  toNetworkId String
+  toTokenId   String @default("")
+
+  /// For TP/SL: trigger when mark price (in quote stable) crosses level
+  /// takeProfitPct: e.g. 20 = close when +20% from entry
+  /// stopLossPct: e.g. 10 = close when -10% from entry
+  entryPriceUsd   Decimal? @db.Decimal(36, 18)
+  takeProfitPct   Decimal? @db.Decimal(10, 4)
+  stopLossPct     Decimal? @db.Decimal(10, 4)
+  triggerPriceUsd Decimal? @db.Decimal(36, 18)
+
+  /// Execution
+  lockedAmount     Decimal   @db.Decimal(36, 18)
+  executedAmount   Decimal?  @db.Decimal(36, 18)
+  receivedAmount   Decimal?  @db.Decimal(36, 18)
+  txHash           String?
+  routeProvider    String? // rango | internal
+  quotePayload     Json?
+  failureReason    String?
+  slippageBps      Int       @default(100) // 1%
+  /// Set before signer broadcast (CAS) so recoverStuckExecutions cannot double-send.
+  signingStartedAt DateTime?
+
+  /// Per-order destination address (HD-derived). Isolates on-chain observation
+  /// from shared hot-wallet activity (sweeps, other swaps, withdrawals).
+  receiveAddress         String?
+  receiveDerivationIndex Int?
+  /// True once receive-address → hot sweep has been requested / completed.
+  receiveSwept           Boolean @default(false)
+
+  expiresAt   DateTime?
+  triggeredAt DateTime?
+  completedAt DateTime?
+  /// Monitor: only scan when null or <= now. Far-band rows get deferred nextCheckAt.
+  nextCheckAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@index([status, type])
+  @@index([fromNetworkId, fromTokenId])
+  @@index([createdAt])
+  @@index([status, nextCheckAt])
+  @@index([status, txHash, signingStartedAt])
+  @@index([receiveAddress])
+  @@index([status, receiveSwept])
+}
+
+/// Per-user emergency protection: auto-swap to stable on same chain
+model EmergencyProtection {
+  id                   String    @id @default(cuid())
+  userId               String    @unique
+  enabled              Boolean   @default(false)
+  /// Drop from 24h high / entry reference that triggers exit (e.g. 15 = 15%)
+  dropPct              Decimal   @default(15) @db.Decimal(10, 4)
+  /// Preferred stable tokenId per network stored as JSON map { "ethereum": "usdc-ethereum", ... }
+  stableTokenByNetwork Json      @default("{}")
+  /// Only protect these assets (empty = all non-stable balances)
+  watchTokenIds        String[]  @default([])
+  lastTriggeredAt      DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+enum PositionSide {
+  BUY
+  SELL
+}
+
+enum PositionStatus {
+  OPEN
+  CLOSING
+  CLOSED
+  LIQUIDATED
+  CANCELLED
+}
+
+/// Distinguishes agency (asset locked) vs legacy (stable margin locked) positions.
+/// Avoids guessing from aggregate Balance.locked which can be polluted by other holds.
+enum PositionType {
+  AGENCY
+  LEGACY
+}
+
+/// Beginner product: lock stablecoin, bet on price direction, settle PnL in stable only.
+model BeginnerPosition {
+  id           String         @id @default(cuid())
+  userId       String
+  status       PositionStatus @default(OPEN)
+  side         PositionSide
+  /// Explicit type so close path never relies on aggregate locked balances.
+  positionType PositionType   @default(AGENCY)
+
+  /// Asset being traded (the "coin" user thinks will go up/down)
+  assetNetworkId String
+  assetTokenId   String @default("")
+
+  /// Margin + settlement always in stable on same or chosen network
+  stableNetworkId String
+  stableTokenId   String
+  /// Locked stable margin
+  marginStable    Decimal @db.Decimal(36, 18)
+  /// Optional leverage (1 = spot-like; keep low for beginners)
+  leverage        Decimal @default(1) @db.Decimal(10, 4)
+
+  entryPriceUsd Decimal @db.Decimal(36, 18)
+  /// Notional = margin * leverage (USD)
+  notionalUsd   Decimal @db.Decimal(36, 18)
+
+  takeProfitPct Decimal? @db.Decimal(10, 4)
+  stopLossPct   Decimal? @db.Decimal(10, 4)
+  takeProfitUsd Decimal? @db.Decimal(36, 18)
+  stopLossUsd   Decimal? @db.Decimal(36, 18)
+
+  exitPriceUsd Decimal? @db.Decimal(36, 18)
+  pnlStable    Decimal? @db.Decimal(36, 18)
+  feeStable    Decimal  @default(0) @db.Decimal(36, 18)
+
+  closeReason String?
+  openedAt    DateTime  @default(now())
+  closedAt    DateTime?
+  expiresAt   DateTime?
+  /// Monitor: only scan when null or <= now. Far-band rows deferred.
+  nextCheckAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@index([status])
+  @@index([assetNetworkId, assetTokenId])
+  @@index([openedAt])
+  @@index([status, nextCheckAt])
+}
+
+/// Audit log of router attempts (Rango / Jupiter / etc.)
+model SwapRouteAttempt {
+  id           String   @id @default(cuid())
+  tradeOrderId String?
+  userId       String?
+  provider     String
+  success      Boolean
+  fromAsset    String
+  toAsset      String
+  amountIn     String
+  amountOut    String?
+  error        String?
+  latencyMs    Int?
+  raw          Json?
+  createdAt    DateTime @default(now())
+
+  @@index([tradeOrderId])
+  @@index([provider, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// 2FA / Sessions / Whitelist / Idempotency (upgrade)
+// ---------------------------------------------------------------------------
+
+model Session {
+  id             String    @id @default(cuid())
+  userId         String
+  refreshTokenId String?   @unique
+  /// Access-token JTI issued with this session (for targeted blacklist on revoke)
+  accessTokenJti String?
+  userAgent      String?
+  ip             String?
+  deviceLabel    String?
+  lastActiveAt   DateTime  @default(now())
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([revokedAt])
+  @@index([accessTokenJti])
+}
+
+model TrustedDevice {
+  id         String   @id @default(cuid())
+  userId     String
+  deviceHash String
+  label      String?
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, deviceHash])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model WithdrawalAddress {
+  id          String   @id @default(cuid())
+  userId      String
+  networkId   String
+  address     String
+  label       String?
+  /// Address cannot receive withdrawals until this time (cooldown after add)
+  usableAfter DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, networkId, address])
+  @@index([userId])
+}
+
+model TwoFactorAudit {
+  id        String   @id @default(cuid())
+  userId    String?
+  event     String
+  method    String?
+  ip        String?
+  userAgent String?
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([event, createdAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model EmailVerifyToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model IdempotencyRecord {
+  id           String   @id @default(cuid())
+  userId       String?
+  key          String
+  method       String
+  path         String
+  requestHash  String?
+  statusCode   Int
+  responseBody Json
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key, method, path])
+  @@index([expiresAt])
+}
+
+model OtpChallenge {
+  id         String    @id @default(cuid())
+  userId     String
+  purpose    String
+  method     String
+  codeHash   String
+  attempts   Int       @default(0)
+  expiresAt  DateTime
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, purpose])
+  @@index([expiresAt])
+}
+
+model PreAuthToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Append-only journal for balance-affecting events (never delete/update amounts).
+model LedgerEntry {
+  id           String   @id @default(cuid())
+  userId       String
+  networkId    String
+  tokenId      String   @default("")
+  /// deposit_credit | trade_settle | fee | withdrawal_lock | withdrawal_burn | withdrawal_unlock | admin_adjust
+  kind         String
+  /// signed amount applied to available (or locked delta documented in meta)
+  amount       Decimal  @db.Decimal(36, 18)
+  balanceAfter Decimal? @db.Decimal(36, 18)
+  refType      String?
+  refId        String?
+  meta         Json?
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([kind, createdAt])
+  @@index([refType, refId])
+}
+
+/// Persistent admin action log (confirm-fill overrides, force-fail, etc.)
+model AdminAudit {
+  id        String   @id @default(cuid())
+  action    String
+  adminId   String
+  detail    Json?
+  createdAt DateTime @default(now())
+
+  @@index([adminId, createdAt])
+  @@index([action, createdAt])
+}
+
+/// Signer-only: consumed ApprovalToken nonces (prevent replay).
+model ApprovalNonce {
+  nonce    String   @id
+  entityId String
+  exp      DateTime
+  usedAt   DateTime @default(now())
+
+  @@index([entityId])
+  @@index([usedAt])
+}
+
+/// Signer-only: cumulative spend events for hourly/daily caps.
+model SignerSpendEvent {
+  id        String   @id @default(cuid())
+  entityId  String
+  kind      String // withdrawal | swap | cold_sweep
+  networkId String
+  tokenId   String   @default("")
+  amount    String
+  amountUsd Decimal  @default(0) @db.Decimal(36, 18)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([entityId])
+}
+
+/// Signer-only: HMAC request nonces for API↔signer replay protection.
+model SignerRequestNonce {
+  nonce  String   @id
+  usedAt DateTime @default(now())
+
+  @@index([usedAt])
+}
+
+/// Cold transfer records (excess hot → cold multisig). Idempotent by sweepId.
+model ColdTransfer {
+  id        String   @id @default(cuid())
+  sweepId   String   @unique
+  networkId String
+  tokenId   String   @default("")
+  amount    String
+  toAddress String
+  txHash    String?
+  status    String   @default("PENDING") // PENDING | BROADCAST | CONFIRMED | FAILED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([networkId, status])
+  @@index([createdAt])
+}
+
+/// Deposit→hot sweep attempts (signer-side idempotency, R5). sweepId is
+/// deterministic per logical sweep (see sweepIds.ts); replays return the
+/// recorded result instead of rebroadcasting.
+model DepositSweep {
+  id          String   @id @default(cuid())
+  sweepId     String   @unique
+  networkId   String
+  tokenId     String   @default("")
+  fromAddress String
+  amount      String   @default("")
+  note        String?
+  txHash      String?
+  status      String   @default("PENDING") // PENDING | SWEEPING | SWEPT | SKIPPED | FAILED
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([networkId, status])
+  @@index([createdAt])
+}
+
+/// Dual-control approval grant. Written by approval-service role only.
+model ApprovalGrant {
+  id             String    @id @default(cuid())
+  entityId       String
+  kind           String
+  networkId      String
+  tokenId        String    @default("")
+  amount         String
+  toAddress      String
+  makerAdminId   String
+  checkerAdminId String?
+  status         String    @default("PENDING")
+  tokenNonce     String?
+  expiresAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([entityId, kind])
+  @@index([status, createdAt])
+  @@index([makerAdminId])
+  @@index([checkerAdminId])
+}
+
+// ---------------------------------------------------------------------------
+// AI Agent / Muse layer
+// ---------------------------------------------------------------------------
+
+/// Machine credentials for the Agent Gateway. Scopes: read | trade only.
+model AgentKey {
+  id         String    @id @default(cuid())
+  userId     String
+  name       String
+  /// sha256 hex of the raw secret (ak_…)
+  keyHash    String    @unique
+  /// First 8 chars of the secret for display
+  keyPrefix  String
+  scopes     String[]
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actions AgentAction[]
+
+  @@index([userId, revokedAt])
+  @@index([keyHash])
+}
+
+/// One row per Muse interaction (chat / copilot / plan / strategy / critique).
+model AgentAction {
+  id              String    @id @default(cuid())
+  userId          String
+  agentKeyId      String?
+  capability      String
+  dryRun          Boolean   @default(true)
+  status          String    @default("STARTED") // STARTED | COMPLETED | FAILED | DENIED
+  requestSummary  String?
+  responseSummary String?
+  policyKind      String?
+  proposalId      String?
+  meta            Json?
+  createdAt       DateTime  @default(now())
+  completedAt     DateTime?
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentKey AgentKey? @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([agentKeyId, createdAt])
+  @@index([capability, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Structured audit events for the agent layer.
+model AgentAuditEvent {
+  id         String   @id @default(cuid())
+  type       String
+  userId     String
+  agentKeyId String?
+  actionId   String?
+  capability String?
+  message    String
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([actionId])
+  @@index([type, createdAt])
+  @@index([agentKeyId, createdAt])
+}
+
+/// Full-fidelity per-run transcript for the Muse crew (see transcript.service).
+/// One row per model-call attempt (ROLE_TURN), tool execution (TOOL_CALL), and
+/// a single DECISION_TRACE per run. Payloads are redacted and size-capped
+/// before write; ordered per run by (seq, createdAt). Retention: pruned by
+/// age (see pruneTranscriptEntries); default 90 days.
+model AgentTranscriptEntry {
+  id         String   @id @default(cuid())
+  actionId   String
+  userId     String
+  agentKeyId String?
+  capability String?
+  mode       String?
+  seq        Int
+  kind       String
+  role       String?
+  model      String?
+  entry      Json
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([actionId, seq])
+  @@index([actionId, kind])
+}

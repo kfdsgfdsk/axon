@@ -1,0 +1,165 @@
+/* Trade: catalog asset picker with logos. */
+
+.apick { position: relative; width: 100%; }
+
+.apick-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 8px 12px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink);
+  transition: border-color 0.14s ease;
+}
+
+.apick-btn:hover:not(:disabled) { border-color: #4a483c; }
+.apick-btn:disabled { opacity: 0.6; cursor: wait; }
+
+.apick-label {
+  display: grid;
+  gap: 0;
+  line-height: 1.3;
+  min-width: 0;
+}
+
+.apick-label strong {
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.apick-sub {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.apick-stable {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--up);
+  background: var(--up-soft);
+  border: 1px solid rgba(61, 220, 132, 0.3);
+  border-radius: var(--r-pill);
+  padding: 1px 7px;
+}
+
+.apick-chev {
+  width: 15px;
+  height: 15px;
+  margin-left: auto;
+  flex: none;
+  color: var(--ink-faint);
+}
+
+.apick-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+  min-width: 260px;
+}
+
+.apick-search { padding: 8px; border-bottom: 1px solid var(--line-soft); }
+
+.apick-search input {
+  width: 100%;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 8px 11px;
+  font-size: 13px;
+  color: var(--ink);
+  outline: none;
+}
+
+.apick-search input:focus { border-color: var(--signal); }
+
+.apick-nets {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.apick-net {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  padding: 4px 12px 4px 5px;
+  cursor: pointer;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.apick-net:first-child { padding-left: 12px; }
+
+.apick-net:hover:not(.on) { color: var(--ink); border-color: #4a483c; }
+
+.apick-net.on {
+  background: linear-gradient(180deg, #f6f2e7, #ddd7c6);
+  color: var(--bg);
+  border-color: #f6f2e7;
+}
+
+.apick-list { max-height: 300px; overflow-y: auto; padding: 4px; }
+
+.apick-group {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 8px 10px 4px;
+}
+
+.apick-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--ink);
+}
+
+.apick-row:hover { background: var(--panel-2); }
+.apick-row.on { background: var(--panel-2); border-color: var(--line); }
+
+.apick-check {
+  margin-left: auto;
+  color: var(--up);
+  font-size: 13px;
+  font-weight: 700;
+}

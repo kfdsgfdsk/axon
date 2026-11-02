@@ -1,0 +1,182 @@
+/* Deposits: chain picker rows with per-chain timers + detail panel. */
+
+.chain-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.chain-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 1px 2px rgba(0, 0, 0, 0.35);
+  border-radius: var(--r-sm);
+  padding: 9px 12px;
+  cursor: pointer;
+  color: var(--ink-dim);
+  transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1), color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.chain-row:hover:not(.on) {
+  color: var(--ink);
+  border-color: #4a483c;
+  transform: translateY(-1px);
+}
+
+.chain-row:active:not(.on) {
+  transform: translateY(1px);
+  transition-duration: 0.07s;
+}
+
+.chain-row.on {
+  background: linear-gradient(180deg, #f6f2e7, #ddd7c6);
+  color: var(--bg);
+  border-color: #f6f2e7;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.chain-row.on .chain-sym { filter: saturate(1.4) brightness(0.55); }
+.chain-row.on .chain-timer.is-none { color: #5d584c; }
+.chain-row.on .chain-timer.is-live { color: #0d6b3c; }
+.chain-row.on .chain-timer.is-expired { color: #a11; }
+.chain-row.on .chain-timer.is-busy { color: #7a5c00; }
+.chain-row.on .chain-watch { color: #7a5c00; }
+
+.chain-name {
+  display: grid;
+  gap: 0;
+  line-height: 1.25;
+}
+
+.chain-name strong {
+  font-size: 13.5px;
+  font-weight: 650;
+}
+
+.chain-sym {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  font-weight: 600;
+}
+
+.chain-timer {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chain-timer.is-none { color: var(--ink-faint); font-weight: 500; }
+.chain-timer.is-live { color: var(--up); }
+.chain-timer.is-expired { color: var(--down); }
+.chain-timer.is-busy { color: var(--warn); }
+
+.chain-watch {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--warn);
+}
+
+.chain-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* Asset strip: native + tokens on the selected chain. Wraps so every
+   depositable asset is visible at once — none hidden in a scroller. */
+.asset-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.asset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  padding: 5px 13px 5px 6px;
+  cursor: pointer;
+  color: var(--ink-dim);
+  font-size: 12.5px;
+  font-weight: 600;
+  transition: transform 0.16s cubic-bezier(0.22, 1, 0.36, 1), color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+
+.asset-chip:hover:not(.on) {
+  color: var(--ink);
+  border-color: #4a483c;
+  transform: translateY(-1px);
+}
+
+.asset-chip.on {
+  background: linear-gradient(180deg, #f6f2e7, #ddd7c6);
+  color: var(--bg);
+  border-color: #f6f2e7;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Detail panel for the selected chain. */
+.deposit-detail {
+  background: var(--bg-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.deposit-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.deposit-detail-head > div { min-width: 0; }
+
+.deposit-timer {
+  margin-left: auto;
+  flex: none;
+  white-space: nowrap;
+}
+
+.deposit-detail-title {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.expiry-track {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+
+.expiry-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--up);
+  transition: width 1s linear;
+}
+
+.expiry-fill.soon { background: var(--down); }
+
+@media (prefers-reduced-motion: reduce) {
+  .expiry-fill { transition: none; }
+}

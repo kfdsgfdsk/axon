@@ -1,0 +1,92 @@
+/* AXON design tokens — editorial terminal.
+   Ink-on-graphite with one signal color. No gradients, no glow-everywhere. */
+
+:root {
+  --bg: #131210;
+  --bg-2: #181713;
+  --panel: #1d1c17;
+  --panel-2: #23221c;
+  --line: #2c2b24;
+  --line-soft: #23221c;
+
+  --ink: #f2eee3;
+  --ink-dim: #a9a396;
+  --ink-faint: #6f6a5d;
+
+  --signal: #ff5c00;
+  --signal-soft: rgba(255, 92, 0, 0.12);
+  --signal-ink: #160903;
+
+  --paper: #f2eee3;
+  --paper-2: #e7e1d2;
+  --paper-ink: #171511;
+  --paper-dim: #5d584c;
+
+  --up: #3ddc84;
+  --up-soft: rgba(61, 220, 132, 0.1);
+  --down: #ff5252;
+  --down-soft: rgba(255, 82, 82, 0.1);
+  --warn: #e8b400;
+  --warn-soft: rgba(232, 180, 0, 0.12);
+  --info: #7cc4ff;
+  --info-soft: rgba(124, 196, 255, 0.1);
+
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+
+  --rail-w: 228px;
+  --topbar-h: 56px;
+
+  --shadow-pop: 0 18px 50px rgba(0, 0, 0, 0.5);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection { background: var(--signal); color: #fff; }
+
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; }
+input, select, textarea { font: inherit; color: inherit; }
+
+/* thin dark scrollbars */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: #35342c; border-radius: 8px; border: 2px solid var(--bg); }
+*::-webkit-scrollbar-track { background: transparent; }
+
+.mono { font-family: var(--font-mono); }
+.display { font-family: var(--font-display); }
+
+.num-up { color: var(--up); }
+.num-down { color: var(--down); }
+
+/* focus visibility for keyboard demo flow */
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

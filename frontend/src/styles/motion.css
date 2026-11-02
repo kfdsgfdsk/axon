@@ -1,0 +1,51 @@
+/* AXON motion — quiet, fast, physical. Everything gated on reduced-motion. */
+
+@keyframes page-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.content > * { animation: page-in 0.32s ease both; }
+
+@keyframes ev-in {
+  from { opacity: 0; transform: translateX(-6px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.crew-ev { animation: ev-in 0.22s ease both; }
+
+@keyframes modal-pop {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.modal { animation: modal-pop 0.18s ease both; }
+.modal-veil { animation: veil-in 0.15s ease both; }
+@keyframes veil-in { from { opacity: 0; } to { opacity: 1; } }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+.toast { animation: toast-in 0.2s ease both; }
+
+/* button physics live in ui.css; reduced-motion handled globally in tokens.css */
+
+.rail-link { transition: background 0.12s ease, color 0.12s ease; }
+
+@keyframes caret-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+.stream-caret {
+  display: inline-block; width: 8px; height: 14px;
+  background: var(--signal); border-radius: 2px;
+  vertical-align: -2px; margin-left: 6px;
+  animation: caret-blink 1s ease-in-out infinite;
+}
+
+.card-lift { transition: border-color 0.15s ease; }
+.card-lift:hover { border-color: #3d3c33; }
+
+.tbl tbody tr { animation: none; }
+
+.num-tick { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  .content > *, .crew-ev, .modal, .modal-veil, .toast { animation: none; }
+  .stream-caret { animation: none; }
+}
