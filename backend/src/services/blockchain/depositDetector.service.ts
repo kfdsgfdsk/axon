@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { Connection, PublicKey } from '@solana/web3.js';
 import config from '../../config';
 import { getNetwork } from './networks';
+import { solanaRpcFor } from './solanaRpc';
 import {
   getEvmProvider,
   resetEvmProvider,
@@ -82,7 +83,7 @@ export async function scanAllNetworks(): Promise<void> {
       } else if (network.type === 'bitcoin') {
         await scanBitcoin();
       } else if (network.type === 'solana') {
-        await scanSolana();
+        await scanSolana(networkId);
       } else if (network.type === 'tron') {
         await scanTron();
       }
@@ -1187,16 +1188,16 @@ async function scanBitcoin(): Promise<void> {
   }
 }
 
-async function scanSolana(): Promise<void> {
-  const rpc = config.rpc.solana;
+export async function scanSolana(networkId: string = 'solana'): Promise<void> {
+  const rpc = solanaRpcFor(networkId);
   if (!rpc) return;
 
   const connection = new Connection(rpc, 'confirmed');
-  const network = getNetwork('solana');
-  const addresses = await getWatchedAddresses('solana');
+  const network = getNetwork(networkId);
+  const addresses = await getWatchedAddresses(networkId);
   if (addresses.length === 0) return;
 
-  const tokens = await getTokensForNetwork('solana');
+  const tokens = await getTokensForNetwork(networkId);
   const mintSet = new Map(tokens.map((t) => [t.contractAddress, t]));
 
   for (const dep of addresses) {
@@ -1257,7 +1258,7 @@ async function scanSolana(): Promise<void> {
             await upsertDeposit({
               userId: dep.userId,
               depositAddressId: dep.id,
-              networkId: 'solana',
+              networkId,
               tokenId: '',
               tokenContract: null,
               txHash: sig.signature,
@@ -1298,7 +1299,7 @@ async function scanSolana(): Promise<void> {
           await upsertDeposit({
             userId: dep.userId,
             depositAddressId: dep.id,
-            networkId: 'solana',
+            networkId,
             tokenId: tokenCfg.id,
             tokenContract: mint,
             txHash: sig.signature,

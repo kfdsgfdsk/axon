@@ -79,21 +79,29 @@ export async function chartTool(
   let networkId = parsed.data.networkId;
   let tokenId = parsed.data.tokenId;
   const symbolParam = parsed.data.symbol;
-  if (!networkId && !tokenId && symbolParam) {
-    // Bare-symbol path mirrors the prices tool: hub key first, then split.
-    const { resolveAssetKey } = await import(
-      '../../../services/trading/priceHub.service'
-    );
-    const key = resolveAssetKey(symbolParam);
-    if (key.startsWith('native:')) {
-      networkId = key.slice('native:'.length);
-    } else if (key.startsWith('token:')) {
-      tokenId = key.slice('token:'.length);
-      const { getTokenSync, warmTokenCache } = await import(
-        '../../../services/blockchain/tokenRegistry.service'
-      );
-      await warmTokenCache();
-      networkId = getTokenSync(tokenId)?.networkId || '';
+  if (symbolParam || (tokenId && networkId)) {
+    // Any symbol-bearing call shares the prices tool's rule FIRST: chain +
+    // asset identity, loud on ambiguity, legacy fallback otherwise. Without
+    // this, { symbol: 'RAY', networkId: 'solana' } skipped resolution and
+    // charted the chain native (SOL) while claiming RAY. Exact tokenIds
+    // still win and contradicting tokenId+networkId pairs error loudly.
+    const { resolveCrewAssetKey } = await import('../assetResolve');
+    try {
+      const r = await resolveCrewAssetKey({
+        symbol: symbolParam,
+        networkId,
+        tokenId,
+      });
+      networkId = r.networkId || networkId;
+      tokenId = r.tokenId;
+    } catch (err) {
+      return {
+        toolCallId: '',
+        name: 'chart',
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - started,
+      };
     }
   }
   if (!networkId && !tokenId) {

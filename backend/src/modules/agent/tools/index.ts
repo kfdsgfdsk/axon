@@ -72,39 +72,41 @@ export async function executeTool(
 export const toolDefinitions = [
   {
     name: 'balances' as ToolName,
-    description: 'Get current available and locked balances for the user.',
+    description:
+      'Get current available and locked balances for the user. Every row carries networkId + tokenId (tokenId null = native asset); copy those ids verbatim into prices/simulate calls, never bare symbols. Rows also carry symbol + network display names — narrate from those ("USDC on Solana"), never from raw ids.',
     parameters: {
       type: 'object',
       properties: {
-        networkId: { type: 'string' },
-        tokenId: { type: 'string' },
+        networkId: { type: 'string', description: 'Chain id, e.g. solana' },
+        tokenId: { type: 'string', description: 'Registry token id or null for native' },
       },
     },
   },
   {
     name: 'prices' as ToolName,
     description:
-      'Get mark prices. Pass symbols (e.g. SOL, ETH) and/or tokenId for specific assets, or networkId alone for that chain\'s native + tokens. Each mark carries price/source/updatedAt/ageMs/stale — stale=true only means older than ~3s (the settlement bar); for dry-run analysis, ageMs under a few minutes is fresh. Unknown assets yield explicit null-price entries.',
+      'Get mark prices. Name each asset with chain + asset identity: networkId with symbol (e.g. networkId solana + symbol USDC), or an exact tokenId (e.g. usdc-solana); networkId alone reads that chain\'s native + tokens. A bare symbol live on several chains (USDC, USDT, WETH, ...) ERRORS as ambiguous — pair it with networkId. Native aliases (SOL, ETH, BTC, ...) resolve to their native chain. Each mark carries price/source/updatedAt/ageMs/stale — stale=true only means older than ~3s (the settlement bar); for dry-run analysis, ageMs under a few minutes is fresh. Unknown assets yield explicit null-price entries.',
     parameters: {
       type: 'object',
       properties: {
-        symbols: { type: 'array', items: { type: 'string' } },
-        networkId: { type: 'string' },
-        tokenId: { type: 'string' },
+        symbols: { type: 'array', items: { type: 'string' }, description: 'Pair multi-chain symbols with networkId' },
+        networkId: { type: 'string', description: 'Chain id that disambiguates symbols' },
+        tokenId: { type: 'string', description: 'Exact registry id, e.g. usdc-solana' },
       },
     },
   },
   {
     name: 'simulate' as ToolName,
-    description: 'Simulate a swap (quote only). Never executes a live trade.',
+    description:
+      'Simulate a swap (quote only). Never executes a live trade. Name EACH leg with networkId + tokenId exactly as shown in balances (e.g. fromNetworkId solana, fromTokenId usdc-solana). Native legs omit tokenId or pass null — never the string "null". A bare symbol (e.g. USDC) is resolved on that leg\'s networkId, unknown symbols error loudly. amount is human units (e.g. "2000"). Result carries the expected payout plus worst-case payout, fee, and slippage setting when the quote provides them.',
     parameters: {
       type: 'object',
       properties: {
-        fromNetworkId: { type: 'string' },
-        toNetworkId: { type: 'string' },
-        fromTokenId: { type: 'string' },
-        toTokenId: { type: 'string' },
-        amount: { type: 'string' },
+        fromNetworkId: { type: 'string', description: 'Source chain id, e.g. solana' },
+        toNetworkId: { type: 'string', description: 'Destination chain id' },
+        fromTokenId: { type: 'string', description: 'Registry id (e.g. usdc-solana) or null for native' },
+        toTokenId: { type: 'string', description: 'Registry id or null for native; never "null"' },
+        amount: { type: 'string', description: 'Human units, e.g. "2000"' },
       },
       required: ['fromNetworkId', 'toNetworkId', 'amount'],
     },
@@ -135,13 +137,13 @@ export const toolDefinitions = [
   {
     name: 'chart' as ToolName,
     description:
-      '24h price history for one asset: change, range, volatility, trend, and recent closes. Pass symbol (e.g. SOL), networkId, or tokenId. Use for chart/momentum/trend questions instead of guessing from a single mark.',
+      '24h price history for one asset: change, range, volatility, trend, and recent closes. Name the asset with chain + asset identity: symbol with networkId, or an exact tokenId. A bare symbol live on several chains ERRORS as ambiguous; native aliases (SOL, ETH, BTC) resolve directly. Use for chart/momentum/trend questions instead of guessing from a single mark.',
     parameters: {
       type: 'object',
       properties: {
-        symbol: { type: 'string' },
-        networkId: { type: 'string' },
-        tokenId: { type: 'string' },
+        symbol: { type: 'string', description: 'Pair multi-chain symbols with networkId' },
+        networkId: { type: 'string', description: 'Chain id that disambiguates the symbol' },
+        tokenId: { type: 'string', description: 'Exact registry id, e.g. usdc-solana' },
       },
     },
   },

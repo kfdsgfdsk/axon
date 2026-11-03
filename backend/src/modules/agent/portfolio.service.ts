@@ -17,6 +17,7 @@ import { listOrders } from '../trading/trade.service';
 import { listPositions } from '../trading/beginner.service';
 import type { PortfolioBalanceView, PortfolioContext } from './types';
 import type { DemoBook } from '../demo/demoBook';
+import { describeAsset, displayNetwork, displaySymbol } from './humanize';
 import logger from '../../utils/logger';
 
 function toNumber(value: unknown): number {
@@ -36,6 +37,8 @@ export async function buildPortfolioContext(
     networkId: b.networkId,
     tokenId: b.tokenId,
     asset: b.asset,
+    symbol: displaySymbol(b.tokenId, b.networkId),
+    network: displayNetwork(b.networkId),
     available: b.available,
     locked: b.locked,
     updatedAt: b.updatedAt ? b.updatedAt.toISOString() : null,
@@ -124,6 +127,10 @@ export async function buildPortfolioContext(
       open: open.slice(0, 10).map((p: any) => ({
         side: String(p.side),
         asset: String(p.assetTokenId || '') || `native:${p.assetNetworkId}`,
+        display: describeAsset(
+          String(p.assetTokenId || '') || null,
+          String(p.assetNetworkId || '')
+        ),
         marginStable: String(p.marginStable),
         leverage: String(p.leverage),
         pnlStable: p.pnlStable == null ? null : String(p.pnlStable),

@@ -185,7 +185,7 @@ export async function signAndBroadcast(
 }
 
 /**
- * Sign and broadcast a pre-built swap tx (Jupiter / 0x / Rango).
+ * Sign and broadcast a pre-built swap tx (Jupiter / LI.FI / Kyber / SunSwap).
  * Keys never leave this call stack.
  */
 export async function signAndBroadcastSwap(

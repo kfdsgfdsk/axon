@@ -229,7 +229,10 @@ describe('runCrew — multi-agent pipeline', () => {
 
     expect(result.proposal!.summary).toMatch(/HOLD|stale|concentration/i);
     expect(result.proposal!.risks.length).toBeGreaterThan(0);
-    expect(result.proposal!.critique).toMatch(/red_/);
+    // Critique names each red-team check in plain words (no raw role ids).
+    expect(result.proposal!.critique).toMatch(/slippage check/);
+    expect(result.proposal!.critique).toMatch(/concentration check/);
+    expect(result.proposal!.critique).not.toMatch(/red_/);
     // Safety: default action remains non-executing HOLD-style
     expect(
       result.proposal!.actions.every((a) =>
@@ -329,6 +332,124 @@ describe('runCrew — multi-agent pipeline', () => {
     const scout = result.crewTurns.find((t) => t.role === 'scout');
     expect(scout?.toolResults).toHaveLength(2);
     expect(scout?.toolResults?.[1].cached).toBe(true);
+  });
+
+  test('cache treats explicit null legs as absent (scout + simulator share quotes)', async () => {
+    let scoutCalls = 0;
+    mockComplete.mockImplementation(async (input) => {
+      if (input.role === 'scout' && scoutCalls === 0) {
+        scoutCalls += 1;
+        return {
+          content: '',
+          toolCalls: [
+            {
+              id: 'call-sim-1',
+              name: 'simulate' as const,
+              params: { fromNetworkId: 'solana', toNetworkId: 'solana', amount: '500' },
+            },
+          ],
+          model: 'muse-spark-mock',
+        };
+      }
+      if (input.role === 'simulator' && scoutCalls === 1) {
+        scoutCalls += 1;
+        return {
+          content: '',
+          toolCalls: [
+            {
+              id: 'call-sim-2',
+              name: 'simulate' as const,
+              params: {
+                fromNetworkId: 'solana',
+                toNetworkId: 'solana',
+                fromTokenId: 'usdc-solana',
+                toTokenId: null,
+                amount: '500',
+              },
+            },
+          ],
+          model: 'muse-spark-mock',
+        };
+      }
+      return { content: `${input.role} done`, model: 'muse-spark-mock' };
+    });
+    mockExecTool.mockResolvedValue({
+      toolCallId: 'call-sim-1',
+      name: 'simulate',
+      ok: true,
+      data: { ok: true, amountIn: '500' },
+      durationMs: 3,
+    });
+
+    // Different legs (native vs usdc source) must NOT share a cache entry.
+    await runCrew({
+      principal,
+      capability: 'reactive',
+      userMessage: 'quote it',
+      dryRun: true,
+      policy: dryPolicy,
+      mode: 'fast',
+    });
+    expect(mockExecTool).toHaveBeenCalledTimes(2);
+
+    // Identical legs with explicit null vs absent MUST share.
+    jest.clearAllMocks();
+    setupHappyMocks();
+    let n = 0;
+    mockComplete.mockImplementation(async (input) => {
+      if (input.role === 'scout' && n === 0) {
+        n += 1;
+        return {
+          content: '',
+          toolCalls: [
+            {
+              id: 'c1',
+              name: 'simulate' as const,
+              params: { fromNetworkId: 'solana', toNetworkId: 'solana', amount: '500' },
+            },
+          ],
+          model: 'muse-spark-mock',
+        };
+      }
+      if (input.role === 'simulator' && n === 1) {
+        n += 1;
+        return {
+          content: '',
+          toolCalls: [
+            {
+              id: 'c2',
+              name: 'simulate' as const,
+              params: {
+                fromNetworkId: 'solana',
+                toNetworkId: 'solana',
+                toTokenId: null,
+                amount: '500',
+              },
+            },
+          ],
+          model: 'muse-spark-mock',
+        };
+      }
+      return { content: `${input.role} done`, model: 'muse-spark-mock' };
+    });
+    mockExecTool.mockResolvedValue({
+      toolCallId: 'c1',
+      name: 'simulate',
+      ok: true,
+      data: { ok: true, amountIn: '500' },
+      durationMs: 3,
+    });
+    const result = await runCrew({
+      principal,
+      capability: 'reactive',
+      userMessage: 'quote it',
+      dryRun: true,
+      policy: dryPolicy,
+      mode: 'fast',
+    });
+    expect(mockExecTool).toHaveBeenCalledTimes(1);
+    const sim = result.crewTurns.find((t) => t.role === 'simulator');
+    expect(sim?.toolResults?.[0].cached).toBe(true);
   });
 
   test('repairs invalid structured judge output instead of accepting prose', async () => {
@@ -605,6 +726,155 @@ describe('runCrew — multi-agent pipeline', () => {
     const firstUser = mockComplete.mock.calls[0][0].messages[0].content;
     expect(firstUser).toContain('<untrusted label="user-request">');
     expect(firstUser).toContain('</untrusted>');
+  });
+
+  test('simulator and risk prompts carry the user ask (quote questions still simulate)', async () => {
+    await runCrew({
+      principal,
+      capability: 'reactive',
+      userMessage: 'How much SOL would I get for 500 USDC on Solana?',
+      dryRun: true,
+      policy: dryPolicy,
+      mode: 'fast',
+    });
+
+    const byRole = (role: string) =>
+      mockComplete.mock.calls
+        .filter((c) => c[0].role === role)
+        .map((c) => c[0].messages.map((m) => m.content).join('\n'))
+        .join('\n');
+    expect(byRole('simulator')).toContain('How much SOL would I get for 500 USDC on Solana?');
+    expect(byRole('simulator')).toContain('<untrusted label="user-request">');
+  });
+
+  test('red-team debate is sequential: later reds see earlier attacks', async () => {
+    const seen: string[] = [];
+    mockComplete.mockImplementation(async (input) => {
+      const blob = input.messages.map((m) => m.content).join('\n');
+      if (input.role.startsWith('red_')) seen.push(`${input.role}::${blob}`);
+      if (input.role === 'red_slippage') {
+        return { content: 'SLIPPAGE-ATTACK-MARKER thin route guard needed', model: 'muse-spark-mock' };
+      }
+      return { content: `${input.role} ok`, model: 'muse-spark-mock' };
+    });
+
+    await runCrew({
+      principal,
+      capability: 'plan',
+      userMessage: 'debate this plan',
+      dryRun: true,
+      policy: dryPolicy,
+      mode: 'deep',
+    });
+
+    const concentration = seen.find((s) => s.startsWith('red_concentration::')) || '';
+    const stale = seen.find((s) => s.startsWith('red_stale::')) || '';
+    const policy = seen.find((s) => s.startsWith('red_policy::')) || '';
+    expect(concentration).toContain('SLIPPAGE-ATTACK-MARKER');
+    expect(stale).toContain('SLIPPAGE-ATTACK-MARKER');
+    expect(policy).toContain('SLIPPAGE-ATTACK-MARKER');
+    // And the first red role sees no earlier attacks.
+    const slippage = seen.find((s) => s.startsWith('red_slippage::')) || '';
+    expect(slippage).not.toContain('Earlier red-team attacks');
+    expect(concentration).toContain('Earlier red-team attacks');
+  });
+
+  test('prose role emitting JSON gets one restatement repair turn', async () => {
+    let riskCalls = 0;
+    mockComplete.mockImplementation(async (input) => {
+      if (input.role === 'risk') {
+        riskCalls += 1;
+        if (riskCalls === 1) {
+          return {
+            content: JSON.stringify({ verdict: 'UNSAFE', evidence: ['tool:balances#1'] }),
+            model: 'muse-spark-mock',
+          };
+        }
+        return { content: 'Risk verdict in plain prose, per your balances.', model: 'muse-spark-mock' };
+      }
+      return { content: `${input.role} ok`, model: 'muse-spark-mock' };
+    });
+
+    const result = await runCrew({
+      principal,
+      capability: 'plan',
+      userMessage: 'check risk',
+      dryRun: true,
+      policy: dryPolicy,
+      mode: 'deep',
+    });
+
+    expect(riskCalls).toBe(2);
+    const risk = result.crewTurns.find((t) => t.role === 'risk');
+    expect(risk?.repairAttempts).toBe(1);
+    expect(risk?.content).toContain('plain prose');
+    expect(risk?.content).not.toContain('tool:balances#1');
+  });
+
+  test('prose turn content is humanized for the user tape', async () => {
+    mockComplete.mockImplementation(async (input) => {
+      if (input.role === 'scout') {
+        return {
+          content: 'Holding usdc-solana per tool:balances#1 as a MARKET_SWAP candidate.',
+          model: 'muse-spark-mock',
+        };
+      }
+      return { content: `${input.role} ok`, model: 'muse-spark-mock' };
+    });
+
+    const result = await runCrew({
+      principal,
+      capability: 'reactive',
+      userMessage: 'balances?',
+      dryRun: true,
+      policy: dryPolicy,
+      mode: 'fast',
+    });
+
+    const scout = result.crewTurns.find((t) => t.role === 'scout');
+    expect(scout?.content).not.toMatch(/usdc-solana|tool:balances#1|MARKET_SWAP/);
+    expect(scout?.content).toMatch(/USDC on Solana/);
+  });
+
+  test('withdrawal ask always holds and states the refusal up front', async () => {
+    mockComplete.mockImplementation(async (input) => {
+      if (input.role === 'judge') {
+        return {
+          content: JSON.stringify({
+            summary: 'Move funds out',
+            actions: [
+              {
+                type: 'MARKET_SWAP',
+                fromNetworkId: 'ethereum',
+                toNetworkId: 'ethereum',
+                amount: '0.1',
+                rationale: 'rebalance into stables',
+              },
+            ],
+            risks: [],
+            assumptions: [],
+          }),
+          model: 'muse-spark-mock',
+        };
+      }
+      if (input.role === 'explainer') {
+        return { content: 'Here is your portfolio overview.', model: 'muse-spark-mock' };
+      }
+      return { content: `${input.role} ok`, model: 'muse-spark-mock' };
+    });
+
+    const result = await runCrew({
+      principal,
+      capability: 'reactive',
+      userMessage: 'Withdraw all my funds to my external wallet now.',
+      dryRun: true,
+      policy: dryPolicy,
+      mode: 'fast',
+    });
+
+    expect(result.proposal?.actions.map((a) => a.type)).toEqual(['HOLD']);
+    expect(result.content).toMatch(/can.t move money out/);
+    expect(result.proposal?.risks.join(' ')).toMatch(/cannot move money out/);
   });
 
   test('prompt injection via model output cannot produce a withdraw action', async () => {

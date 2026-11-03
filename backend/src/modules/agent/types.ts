@@ -152,6 +152,10 @@ export interface PortfolioBalanceView {
   networkId: string;
   tokenId: string | null;
   asset: string;
+  /** Display symbol for prose ("USDC", "SOL") — the model narrates from this. */
+  symbol?: string;
+  /** Display network name ("Solana") — the model narrates from this. */
+  network?: string;
   available: string;
   locked: string;
   updatedAt: string | null;
@@ -175,6 +179,8 @@ export interface PortfolioContext {
     open: Array<{
       side: string;
       asset: string;
+      /** Plain-English asset label ("SOL on Solana") for narration. */
+      display?: string;
       marginStable: string;
       leverage: string;
       pnlStable: string | null;
@@ -193,8 +199,14 @@ export interface SimulationResult {
   toTokenId?: string | null;
   amountIn: string;
   estimatedAmountOut?: string;
+  /** Worst-case payout (route slippage floor) — the slippage-cap evidence. */
+  estimatedAmountOutMin?: string;
+  /** Slippage setting the quote was priced at (percent). */
+  slippagePct?: number;
   estimatedNotionalUsd?: number;
   feeUsd?: number;
+  /** Protocol fee in from-asset units (covers network costs). */
+  feeAmount?: string;
   routeSummary?: string;
   warnings: string[];
   error?: string;

@@ -13,19 +13,22 @@ import * as bitcoin from 'bitcoinjs-lib';
 import { ECPairFactory } from 'ecpair';
 import * as ecc from 'tiny-secp256k1';
 import {
+  AddressLookupTableAccount,
   Connection,
   Keypair,
   PublicKey,
   SystemProgram,
   Transaction,
   TransactionInstruction,
+  TransactionMessage,
   VersionedTransaction,
   sendAndConfirmTransaction,
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
-import TronWeb from 'tronweb';
+import { TronWeb } from '../blockchain/tronweb';
 import config from '../../config';
 import { getNetwork, NetworkConfig } from '../blockchain/networks';
+import { solanaRpcFor } from '../blockchain/solanaRpc';
 import { getEvmProvider } from '../blockchain/evmProvider';
 import { ERC20_ABI } from '../blockchain/tokens';
 import { getToken } from '../blockchain/tokenRegistry.service';
@@ -47,7 +50,20 @@ import prisma from '../../lib/prisma';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { verifyEvmSwapCalldata, type OrderBounds } from './evmSwapDecode';
+import { verifyEvmSwapCalldata, assertProviderSwapMeta, type OrderBounds } from './evmSwapDecode';
+import { SUNSWAP_V2_ROUTER, SUNSWAP_WTRX, type SunSwapFunction } from '../trading/sunswap.client';
+import {
+  SYMBIOSIS_TRON_FEE_CAP,
+  SYMBIOSIS_TRON_PORTAL,
+  SYMBIOSIS_TRON_SELECTOR,
+  tronBase58ToHex,
+} from '../trading/symbiosis.client';
+import {
+  verifyRelayBitcoinDeposit,
+  verifyRelayEvmDeposit,
+  verifyRelaySolanaDepositIx,
+  verifyRelayTronTransfer,
+} from '../trading/relay.client';
 
 const ECPair = ECPairFactory(ecc);
 
@@ -736,9 +752,9 @@ async function broadcastBitcoin(input: BroadcastInput, network: NetworkConfig): 
 // ─── Solana ──────────────────────────────────────────────────────────────────
 
 async function broadcastSolana(input: BroadcastInput, network: NetworkConfig): Promise<string> {
-  const rpc = config.rpc.solana;
+  const rpc = solanaRpcFor(network.id);
   if (!rpc) {
-    throw new AppError('SOLANA_RPC_URL is not configured', 500);
+    throw new AppError(`Solana RPC URL is not configured for ${network.id}`, 500);
   }
 
   const mnemonic = await loadMnemonic();
@@ -839,9 +855,9 @@ async function broadcastSolanaToken(
   tokenId: string
 ): Promise<string> {
   const token = await getToken(tokenId);
-  const rpc = config.rpc.solana;
+  const rpc = solanaRpcFor(network.id);
   if (!rpc) {
-    throw new AppError('SOLANA_RPC_URL is not configured', 500);
+    throw new AppError(`Solana RPC URL is not configured for ${network.id}`, 500);
   }
 
   /** Legacy SPL Token program */
@@ -1034,7 +1050,7 @@ async function broadcastTron(input: BroadcastInput, network: NetworkConfig): Pro
     }
 
     // TronWeb v6 constructor options
-    const tronWeb = new (TronWeb as any)({
+    const tronWeb = new TronWeb({
       fullHost,
       headers,
       privateKey: privateKeyHex,
@@ -1092,7 +1108,7 @@ async function broadcastTron(input: BroadcastInput, network: NetworkConfig): Pro
 }
 
 /**
- * Sign + broadcast a pre-built swap transaction (Jupiter / 0x / Rango).
+ * Sign + broadcast a pre-built swap transaction (Jupiter / LI.FI / Kyber / SunSwap).
  * Reuses the same hot-wallet derivation as withdrawals.
  * Waits for a basic confirmation when the chain supports it (EVM receipt / Solana confirmed).
  */
@@ -1115,18 +1131,21 @@ async function broadcastTron(input: BroadcastInput, network: NetworkConfig): Pro
  * address (40 hex chars after 0x). Malformed / truncated entries are rejected
  * at module load (fail closed).
  *
- * Sources: 0x, 1inch, Uniswap Universal Router, Paraswap Augustus, Rango Diamond.
+ * Sources: LI.FI Diamond, KyberSwap router, Symbiosis portals, 1inch,
+ * Uniswap Universal Router, Paraswap Augustus.
  * Extend via SIGNER_SWAP_ALLOWLIST_TO (comma-separated).
  */
 const RAW_EVM_SWAP_ALLOWLIST = [
-  // 0x Exchange Proxy
-  '0xdef1c0ded9bec7f1a16708139371f370adeff000',
-  // 0x Allowance Holder (v2)
-  '0x0000000000001ff3684f28c67538d4d072c22734',
-  // Rango Diamond (Ethereum mainnet — full 20-byte)
-  '0x69460570c93f9de5e2edb8cd63e391ad275d6e6e',
-  // Rango (common secondary)
-  '0x3a23f943181408eac424116af7b7790c94ca7041',
+  // LI.FI Diamond (canonical — same address on every EVM chain)
+  '0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae',
+  // KyberSwap router (canonical — same address on every EVM chain)
+  '0x6131b5fae19ea4f9d964eac0408e4408b66337b5',
+  // Symbiosis portals (MetaRouter, per origin chain — verified live)
+  '0xb4769e9c5be31199a25ecd1b0c6609183fa72521', // ethereum
+  '0x2ee9559387b806e88fd46b9da160d64a29ce7da0', // polygon
+  '0x3743c756b64ecd0770f1d4f47696a73d2a46dcbe', // arbitrum
+  '0xa18348e793e77239ec68caa51b74c5cdc82c8a9d', // base
+  '0xa9a96ee51dd54b9f51d46b1fbd2a19c1295ec75b', // optimism
   // 1inch Aggregation Router v5
   '0x1111111254eeb25477b68fb85ed929f73a960582',
   // 1inch Aggregation Router v6
@@ -1192,6 +1211,39 @@ function isAllowlistedEvmTo(to: string): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Tron swap router allowlist (exact base58 match — base58 is case-sensitive,
+ * so env entries are NOT lowercased here unlike the EVM path).
+ */
+function isAllowlistedTronRouter(router: string): boolean {
+  const t = router.trim();
+  if (t === SUNSWAP_V2_ROUTER || t === SYMBIOSIS_TRON_PORTAL) return true;
+  const raw = process.env.SIGNER_SWAP_ALLOWLIST_TO || '';
+  for (const part of raw.split(/[\s,]+/)) {
+    if (part.trim() && part.trim() === t) return true;
+  }
+  if (
+    process.env.SIGNER_SWAP_ALLOWLIST_DISABLED === 'true' &&
+    !config.isProdLike
+  ) {
+    logger.warn('SIGNER_SWAP_ALLOWLIST_DISABLED=true — destination allowlist skipped (non-prod)');
+    return true;
+  }
+  return false;
+}
+
+/** Extract backend quote bindings from a built swap payload (any envelope). */
+function extractSwapMeta(raw: unknown): unknown {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, any>;
+  if (r.meta && typeof r.meta === 'object') return r.meta;
+  if (r.transaction && typeof r.transaction === 'object') {
+    return extractSwapMeta(r.transaction);
+  }
+  if (r.tx && typeof r.tx === 'object') return extractSwapMeta(r.tx);
+  return undefined;
 }
 
 const ERC20_IFACE = new ethers.Interface([
@@ -1419,14 +1471,21 @@ async function assertSafeEvmSwapPayload(
   if (!to || !ethers.isAddress(to)) {
     throw new PreSendError('Swap tx missing valid `to` address', 400);
   }
-  if (!isAllowlistedEvmTo(to)) {
-    throw new PreSendError(
-      `Swap destination ${to} is not on the allowlist for provider=${input.provider}. ` +
-        `Add via SIGNER_SWAP_ALLOWLIST_TO or update DEFAULT_EVM_SWAP_ALLOWLIST.`,
-      400
-    );
+  // Relay deposits go to a fresh per-request address (no pinnable contract),
+  // so the allowlist cannot apply — the tx must instead be a plain transfer
+  // of exactly the order's currency + amount. Verified below against the
+  // authoritative order bounds (same TLS trust as every provider quote).
+  const isRelay = input.provider === 'relay';
+  if (!isRelay) {
+    if (!isAllowlistedEvmTo(to)) {
+      throw new PreSendError(
+        `Swap destination ${to} is not on the allowlist for provider=${input.provider}. ` +
+          `Add via SIGNER_SWAP_ALLOWLIST_TO or update DEFAULT_EVM_SWAP_ALLOWLIST.`,
+        400
+      );
+    }
+    assertSafeErc20Calldata(String(parsed.data || '0x'), to);
   }
-  assertSafeErc20Calldata(String(parsed.data || '0x'), to);
 
   const value =
     parsed.value != null && parsed.value !== '' && parsed.value !== '0'
@@ -1435,13 +1494,721 @@ async function assertSafeEvmSwapPayload(
 
   await assertNativeValueWithinOrder(input.tradeOrderId, value, network.decimals ?? 18);
 
-  // Deep calldata verification (sell token, amount, recipient, minOut)
+  // Deep verification (sell token, amount, recipient, minOut). Providers
+  // with opaque diamond calldata (LI.FI, Kyber, Symbiosis) are meta-verified
+  // against the backend's parsed quote instead of selector-decoded — both
+  // bind the tx to the authoritative order bounds.
   const bounds = await loadOrderBounds(input.tradeOrderId);
-  verifyEvmSwapCalldata(to, String(parsed.data || '0x'), bounds);
+  if (isRelay) {
+    const depositAddress = (input.tx as Record<string, any> | null)?.depositAddress;
+    if (typeof depositAddress !== 'string' || !ethers.isAddress(depositAddress)) {
+      throw new PreSendError('Relay deposit address missing or invalid', 400);
+    }
+    try {
+      verifyRelayEvmDeposit({
+        to,
+        data: String(parsed.data || '0x'),
+        value: parsed.value != null ? String(parsed.value) : '0',
+        depositAddress,
+        orderToken: bounds.fromTokenAddress,
+        orderAmountAtomic: bounds.fromAmountAtomic.toString(),
+      });
+    } catch (err: any) {
+      throw new PreSendError(
+        `Relay deposit verification failed: ${err?.message || err}`,
+        400
+      );
+    }
+  } else if (
+    input.provider === 'lifi' ||
+    input.provider === 'kyber' ||
+    input.provider === 'symbiosis'
+  ) {
+    assertProviderSwapMeta(extractSwapMeta(input.tx), bounds);
+  } else {
+    verifyEvmSwapCalldata(to, String(parsed.data || '0x'), bounds);
+  }
 
   return value;
 }
 
+
+// ─── Tron SunSwap broadcast ────────────────────────────────────────────────
+
+/** Fee cap (SUN) for a SunSwap trigger call — unused headroom is not charged. */
+const SUNSWAP_FEE_LIMIT_SUN = 150_000_000;
+
+const SUNSWAP_SEL_TRX_IN =
+  'swapExactETHForTokens(uint256,address[],address,uint256)';
+const SUNSWAP_SEL_TOK_TRX =
+  'swapExactTokensForETH(uint256,uint256,address[],address,uint256)';
+const SUNSWAP_SEL_TOK_TOK =
+  'swapExactTokensForTokens(uint256,uint256,address[],address,uint256)';
+
+/**
+ * Sign + broadcast a SunSwap V2 swap (Tron same-chain).
+ *
+ * The backend passes semantic trigger args; the signer pins the canonical
+ * router itself, verifies every field against authoritative order bounds
+ * (sell leg, amount, floor, recipient, deadline), then encodes, signs with
+ * the hot key, and broadcasts. TRC-20 sells need a pre-set router allowance
+ * from the hot wallet (ops, offline) — never auto-approved here.
+ */
+async function broadcastTronSwap(
+  input: SignSwapBroadcastRequest,
+  network: NetworkConfig
+): Promise<{ txHash: string; status: 0 | 1 | null }> {
+  const host = (config.rpc.tronFullHost || '').trim();
+  if (!host) {
+    throw new PreSendError('TRON_FULL_HOST not set', 500);
+  }
+  if (input.provider !== 'sunswap' && input.provider !== 'symbiosis') {
+    throw new PreSendError(
+      `Tron swaps require provider=sunswap|symbiosis (got ${input.provider})`,
+      400
+    );
+  }
+  if (input.provider === 'symbiosis') {
+    return broadcastSymbiosisTronTrigger(input, network, host);
+  }
+  const raw = input.tx as {
+    kind?: unknown;
+    args?: Record<string, any>;
+    meta?: unknown;
+  } | null;
+  if (!raw || raw.kind !== 'sunswap' || !raw.args || typeof raw.args !== 'object') {
+    throw new PreSendError('Tron swap payload must be a sunswap trigger', 400);
+  }
+  const args = raw.args;
+
+  // In-lock idempotency: never send a second swap for one order.
+  const existingHash = await readTradeOrderTxHash(input.tradeOrderId);
+  if (existingHash) {
+    logger.info('Tron swap: txHash already present — skipping send', {
+      tradeOrderId: input.tradeOrderId,
+      txHash: existingHash,
+    });
+    return { txHash: existingHash, status: null };
+  }
+
+  // The signer pins the router — the payload carries no router address.
+  const router = SUNSWAP_V2_ROUTER;
+  if (!isAllowlistedTronRouter(router)) {
+    throw new PreSendError(`SunSwap router ${router} is not allowlisted`, 400);
+  }
+
+  const bounds = await loadOrderBounds(input.tradeOrderId);
+  assertProviderSwapMeta(raw.meta, bounds);
+  const fromIsNative = bounds.fromTokenAddress === 'native';
+
+  const sel = String(args.functionSelector || '');
+  if (
+    sel !== SUNSWAP_SEL_TRX_IN &&
+    sel !== SUNSWAP_SEL_TOK_TRX &&
+    sel !== SUNSWAP_SEL_TOK_TOK
+  ) {
+    throw new PreSendError(`SunSwap function ${sel} not allowed`, 400);
+  }
+  if (fromIsNative && sel !== SUNSWAP_SEL_TRX_IN) {
+    throw new PreSendError('Native TRX sell must use the TRX entrypoint', 400);
+  }
+  if (!fromIsNative && sel === SUNSWAP_SEL_TRX_IN) {
+    throw new PreSendError('Token sell cannot use the TRX entrypoint', 400);
+  }
+
+  let amountIn: bigint;
+  let amountOutMin: bigint;
+  let valueSun: bigint;
+  try {
+    amountIn = BigInt(String(args.amountIn));
+    amountOutMin = BigInt(String(args.amountOutMin));
+    valueSun = BigInt(String(args.valueSun ?? '0'));
+  } catch {
+    throw new PreSendError('SunSwap malformed amounts', 400);
+  }
+  if (amountIn <= 0n) {
+    throw new PreSendError('SunSwap non-positive sell amount', 400);
+  }
+  if (amountIn > bounds.fromAmountAtomic) {
+    throw new PreSendError(
+      `SunSwap sellAmount ${amountIn} > order ${bounds.fromAmountAtomic}`,
+      400
+    );
+  }
+  if (amountOutMin < bounds.minReceiveAtomic) {
+    throw new PreSendError(
+      `SunSwap minOut ${amountOutMin} < order floor ${bounds.minReceiveAtomic}`,
+      400
+    );
+  }
+  if (valueSun !== (fromIsNative ? amountIn : 0n)) {
+    throw new PreSendError('SunSwap callValue must equal TRX sell amount', 400);
+  }
+
+  const tronWebRead: any = new TronWeb({ fullHost: host });
+  const path = Array.isArray(args.path) ? args.path.map((a: any) => String(a)) : [];
+  if (path.length !== 2 || !path.every((a: string) => tronWebRead.isAddress(a))) {
+    throw new PreSendError('SunSwap path must be exactly 2 valid Tron addresses', 400);
+  }
+  const leg0 = fromIsNative ? SUNSWAP_WTRX : bounds.fromTokenAddress;
+  if (path[0] !== leg0) {
+    throw new PreSendError(
+      `SunSwap path entry ${path[0]} != order sell leg ${leg0}`,
+      400
+    );
+  }
+  if (String(args.to || '') !== bounds.receiveAddress) {
+    throw new PreSendError(
+      `SunSwap recipient ${args.to} != order.receiveAddress ${bounds.receiveAddress}`,
+      400
+    );
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const deadline = Number(args.deadline);
+  if (
+    !Number.isFinite(deadline) ||
+    deadline <= nowSec ||
+    deadline > nowSec + 30 * 60
+  ) {
+    throw new PreSendError('SunSwap deadline out of range', 400);
+  }
+
+  const mnemonic = await loadMnemonic();
+  let privateKey: Uint8Array | null = null;
+  try {
+    const derived = deriveHotPrivateKey(mnemonic, network);
+    privateKey = derived.privateKey;
+    const hex = Buffer.from(privateKey).toString('hex');
+    const tronWeb: any = new TronWeb({
+      fullHost: host,
+      headers: config.rpc.tronApiKey
+        ? { 'TRON-PRO-API-KEY': config.rpc.tronApiKey }
+        : undefined,
+    });
+    const hot: string = tronWeb.address.fromPrivateKey(hex);
+
+    const parameters =
+      sel === SUNSWAP_SEL_TRX_IN
+        ? [
+            { type: 'uint256', value: amountOutMin.toString() },
+            { type: 'address[]', value: path },
+            { type: 'address', value: String(args.to) },
+            { type: 'uint256', value: String(deadline) },
+          ]
+        : [
+            { type: 'uint256', value: amountIn.toString() },
+            { type: 'uint256', value: amountOutMin.toString() },
+            { type: 'address[]', value: path },
+            { type: 'address', value: String(args.to) },
+            { type: 'uint256', value: String(deadline) },
+          ];
+
+    // Final recheck immediately before send.
+    const hashBeforeSend = await readTradeOrderTxHash(input.tradeOrderId);
+    if (hashBeforeSend) {
+      logger.info('Tron swap: txHash appeared before send — aborting duplicate', {
+        tradeOrderId: input.tradeOrderId,
+        txHash: hashBeforeSend,
+      });
+      return { txHash: hashBeforeSend, status: null };
+    }
+
+    logger.info('Broadcasting Tron swap', {
+      networkId: input.networkId,
+      provider: input.provider,
+      from: hot,
+      router,
+      tradeOrderId: input.tradeOrderId,
+      functionSelector: sel,
+      amountIn: amountIn.toString(),
+    });
+
+    const built = await tronWeb.transactionBuilder.triggerSmartContract(
+      router,
+      sel,
+      { feeLimit: SUNSWAP_FEE_LIMIT_SUN, callValue: Number(valueSun) },
+      parameters,
+      hot
+    );
+    const unsigned = built?.transaction;
+    if (!built?.result || !unsigned) {
+      throw new PreSendError(
+        `SunSwap trigger build failed: ${(built as any)?.message || 'no transaction'}`,
+        502
+      );
+    }
+    return signBroadcastWaitTron(tronWeb, unsigned, hex, input.tradeOrderId);
+  } finally {
+    wipeKey(privateKey);
+  }
+}
+
+/**
+ * Sign + broadcast a Symbiosis Tron-origin trigger (Tron → EVM cross-chain).
+ * The envelope carries raw trigger data; the signer pins the portal +
+ * selector, caps the fee, meta-verifies against order bounds, then posts
+ * wallet/triggersmartcontract, signs with the hot key, and broadcasts.
+ */
+async function broadcastSymbiosisTronTrigger(
+  input: SignSwapBroadcastRequest,
+  network: NetworkConfig,
+  host: string
+): Promise<{ txHash: string; status: 0 | 1 | null }> {
+  const raw = input.tx as {
+    kind?: unknown;
+    trigger?: Record<string, any>;
+    meta?: unknown;
+  } | null;
+  if (!raw || raw.kind !== 'symbiosis-tron' || !raw.trigger || typeof raw.trigger !== 'object') {
+    throw new PreSendError('Symbiosis tron payload must be a symbiosis-tron trigger', 400);
+  }
+  const t = raw.trigger;
+
+  const existingHash = await readTradeOrderTxHash(input.tradeOrderId);
+  if (existingHash) {
+    logger.info('Tron swap: txHash already present — skipping send', {
+      tradeOrderId: input.tradeOrderId,
+      txHash: existingHash,
+    });
+    return { txHash: existingHash, status: null };
+  }
+
+  if (!isAllowlistedTronRouter(SYMBIOSIS_TRON_PORTAL)) {
+    throw new PreSendError(`Symbiosis portal ${SYMBIOSIS_TRON_PORTAL} is not allowlisted`, 400);
+  }
+  if (String(t.contract_address || '').toLowerCase() !== tronBase58ToHex(SYMBIOSIS_TRON_PORTAL)) {
+    throw new PreSendError('Symbiosis trigger contract != pinned portal', 400);
+  }
+  if (String(t.function_selector || '') !== SYMBIOSIS_TRON_SELECTOR) {
+    throw new PreSendError(`Symbiosis function ${t.function_selector} not allowed`, 400);
+  }
+  const fee = Number(t.fee_limit);
+  if (!Number.isFinite(fee) || fee <= 0 || fee > SYMBIOSIS_TRON_FEE_CAP) {
+    throw new PreSendError('Symbiosis fee out of range', 400);
+  }
+  const parameter = String(t.parameter || '');
+  if (!parameter || !/^[0-9a-fA-F]+$/.test(parameter)) {
+    throw new PreSendError('Symbiosis empty trigger data', 400);
+  }
+
+  const bounds = await loadOrderBounds(input.tradeOrderId);
+  assertProviderSwapMeta(raw.meta, bounds);
+  const fromIsNative = bounds.fromTokenAddress === 'native';
+  let callValue: bigint;
+  try {
+    callValue = BigInt(String(t.call_value ?? '0'));
+  } catch {
+    throw new PreSendError('Symbiosis malformed call value', 400);
+  }
+  const meta = raw.meta as { fromAmountAtomic?: unknown };
+  let metaAmt: bigint;
+  try {
+    metaAmt = BigInt(String(meta?.fromAmountAtomic));
+  } catch {
+    throw new PreSendError('SWAP_META: malformed sell amount', 400);
+  }
+  if (callValue !== (fromIsNative ? metaAmt : 0n)) {
+    throw new PreSendError('Symbiosis callValue must equal TRX sell amount', 400);
+  }
+
+  const mnemonic = await loadMnemonic();
+  let privateKey: Uint8Array | null = null;
+  try {
+    const derived = deriveHotPrivateKey(mnemonic, network);
+    privateKey = derived.privateKey;
+    const hex = Buffer.from(privateKey).toString('hex');
+    const tronWeb: any = new TronWeb({
+      fullHost: host,
+      headers: config.rpc.tronApiKey
+        ? { 'TRON-PRO-API-KEY': config.rpc.tronApiKey }
+        : undefined,
+    });
+    const hot: string = tronWeb.address.fromPrivateKey(hex);
+    if (String(t.owner_address || '').toLowerCase() !== tronBase58ToHex(hot)) {
+      throw new PreSendError('Symbiosis trigger owner != hot wallet', 400);
+    }
+
+    const hashBeforeSend = await readTradeOrderTxHash(input.tradeOrderId);
+    if (hashBeforeSend) {
+      logger.info('Tron swap: txHash appeared before send — aborting duplicate', {
+        tradeOrderId: input.tradeOrderId,
+        txHash: hashBeforeSend,
+      });
+      return { txHash: hashBeforeSend, status: null };
+    }
+
+    logger.info('Broadcasting Symbiosis Tron trigger', {
+      networkId: input.networkId,
+      provider: input.provider,
+      from: hot,
+      tradeOrderId: input.tradeOrderId,
+      feeLimit: fee,
+    });
+
+    const res = await fetch(`${host.replace(/\/$/, '')}/wallet/triggersmartcontract`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.rpc.tronApiKey ? { 'TRON-PRO-API-KEY': config.rpc.tronApiKey } : {}),
+      },
+      body: JSON.stringify({
+        owner_address: t.owner_address,
+        contract_address: t.contract_address,
+        function_selector: t.function_selector,
+        parameter,
+        fee_limit: fee,
+        call_value: Number(callValue),
+        visible: false,
+      }),
+    });
+    const built = (await res.json().catch(() => null)) as any;
+    const unsigned = built?.transaction;
+    if (!built?.result || !unsigned) {
+      throw new PreSendError(
+        `Symbiosis trigger build failed: ${built?.message || 'no transaction'}`,
+        502
+      );
+    }
+    return signBroadcastWaitTron(tronWeb, unsigned, hex, input.tradeOrderId);
+  } finally {
+    wipeKey(privateKey);
+  }
+}
+
+/** Sign an unsigned Tron tx, broadcast, persist the hash, and wait. Shared by SunSwap + Symbiosis. */
+async function signBroadcastWaitTron(
+  tronWeb: any,
+  unsigned: unknown,
+  privateKeyHex: string,
+  tradeOrderId: string
+): Promise<{ txHash: string; status: 0 | 1 | null }> {
+  const signed = await tronWeb.trx.sign(unsigned, privateKeyHex);
+  const bc = await tronWeb.trx.sendRawTransaction(signed);
+  const txHash = String(bc?.txid || (signed as any)?.txID || '');
+  if (!bc?.result || !txHash) {
+    throw new AppError('Tron broadcast failed (no txid)', 502);
+  }
+
+  // CRITICAL: persist hash BEFORE waiting (same rule as EVM).
+  await persistTradeOrderTxHashEarly(tradeOrderId, txHash);
+
+  const status = await waitTronReceipt(tronWeb, txHash, txWaitTimeoutMs());
+  if (status === 0) {
+    logger.warn('Tron swap reverted on-chain', {
+      hash: txHash,
+      tradeOrderId,
+    });
+  } else if (status === null) {
+    logger.warn('Tron swap confirmation pending — hash persisted, status unknown', {
+      hash: txHash,
+      tradeOrderId,
+    });
+  }
+  return { txHash, status };
+}
+
+/** Poll a Tron txid until confirmed or timeout. 1 = SUCCESS, 0 = revert, null = unknown. */
+async function waitTronReceipt(
+  tronWeb: any,
+  txHash: string,
+  waitMs: number
+): Promise<0 | 1 | null> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    let info: any = null;
+    try {
+      info = await tronWeb.trx.getTransactionInfoById(txHash);
+    } catch {
+      /* RPC hiccup — keep polling */
+    }
+    const result = info?.receipt?.result || info?.ret?.[0]?.contractRet;
+    if (result === 'SUCCESS') return 1;
+    if (result && result !== 'SUCCESS') return 0;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+}
+
+/**
+ * Relay Solana deposit: build a versioned tx from the single verified
+ * instruction (pinned program, exact lamports, hot-wallet signer), simulate,
+ * sign, and broadcast. Mirrors the Jupiter send/confirm/persist tail.
+ */
+async function broadcastRelaySolana(
+  input: SignSwapBroadcastRequest,
+  network: NetworkConfig
+): Promise<{ txHash: string; status: 0 | 1 | null }> {
+  const rpc = solanaRpcFor(network.id);
+  if (!rpc) {
+    throw new AppError(`Solana RPC URL is not configured for ${network.id}`, 500);
+  }
+  const r = (input.tx && typeof input.tx === 'object'
+    ? (input.tx as Record<string, any>)
+    : null) as Record<string, any> | null;
+  if (!r || r.kind !== 'relay-solana' || !Array.isArray(r.instructions)) {
+    throw new PreSendError('Relay solana payload must be a relay-solana envelope', 400);
+  }
+  if (r.instructions.length !== 1) {
+    throw new PreSendError(
+      `Relay solana deposit must carry exactly 1 instruction (got ${r.instructions.length})`,
+      400
+    );
+  }
+
+  const mnemonic = await loadMnemonic();
+  let privateKey: Uint8Array | null = null;
+  try {
+    const derived = deriveHotPrivateKey(mnemonic, network);
+    privateKey = derived.privateKey;
+    const keypair = Keypair.fromSeed(privateKey.slice(0, 32));
+    const hot = keypair.publicKey.toBase58();
+
+    const bounds = await loadOrderBounds(input.tradeOrderId);
+    if (bounds.fromTokenAddress !== 'native') {
+      throw new PreSendError('Relay solana origin must be native SOL', 400);
+    }
+    try {
+      verifyRelaySolanaDepositIx(r.instructions[0], {
+        hotWallet: hot,
+        orderAmountAtomic: bounds.fromAmountAtomic.toString(),
+      });
+    } catch (err: any) {
+      throw new PreSendError(
+        `Relay solana verification failed: ${err?.message || err}`,
+        400
+      );
+    }
+
+    const ix = r.instructions[0] as {
+      keys: Array<{ pubkey: string; isSigner: boolean; isWritable: boolean }>;
+      programId: string;
+      data: string;
+    };
+    const connection = new Connection(rpc, 'confirmed');
+    const txIx = new TransactionInstruction({
+      programId: new PublicKey(ix.programId),
+      keys: ix.keys.map((k) => ({
+        pubkey: new PublicKey(k.pubkey),
+        isSigner: !!k.isSigner,
+        isWritable: !!k.isWritable,
+      })),
+      data: Buffer.from(String(ix.data || '').replace(/^0x/i, ''), 'hex'),
+    });
+    const lutAddrs: string[] = Array.isArray(r.addressLookupTableAddresses)
+      ? r.addressLookupTableAddresses.map(String)
+      : [];
+    const alts: AddressLookupTableAccount[] = [];
+    for (const addr of lutAddrs) {
+      const res = await connection.getAddressLookupTable(new PublicKey(addr));
+      if (!res.value) {
+        throw new PreSendError(`Relay address lookup table ${addr} not found`, 502);
+      }
+      alts.push(res.value);
+    }
+    const blockhash = await connection.getLatestBlockhash('confirmed');
+    const vtx = new VersionedTransaction(
+      new TransactionMessage({
+        payerKey: keypair.publicKey,
+        recentBlockhash: blockhash.blockhash,
+        instructions: [txIx],
+      }).compileToV0Message(alts)
+    );
+
+    try {
+      const sim = await connection.simulateTransaction(vtx, {
+        sigVerify: false,
+        replaceRecentBlockhash: true,
+      });
+      if (sim.value.err) {
+        throw new PreSendError(
+          `Relay solana simulation failed: ${JSON.stringify(sim.value.err)}`,
+          400
+        );
+      }
+    } catch (err: any) {
+      if (err instanceof AppError) throw err;
+      if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging') {
+        throw new PreSendError(
+          `Solana simulation required but failed: ${err?.message || err}`,
+          502
+        );
+      }
+      logger.warn('Relay solana simulation failed (non-prod, continuing)', {
+        error: err?.message,
+        tradeOrderId: input.tradeOrderId,
+      });
+    }
+
+    vtx.sign([keypair]);
+
+    const existingSig = await readTradeOrderTxHash(input.tradeOrderId);
+    if (existingSig) {
+      logger.info('Relay solana: txHash already present — skipping send', {
+        tradeOrderId: input.tradeOrderId,
+        txHash: existingSig,
+      });
+      return { txHash: existingSig, status: null };
+    }
+
+    logger.info('Broadcasting Relay solana deposit', {
+      networkId: input.networkId,
+      from: hot,
+      tradeOrderId: input.tradeOrderId,
+    });
+    const sig = await connection.sendRawTransaction(vtx.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3,
+    });
+    await persistTradeOrderTxHashEarly(input.tradeOrderId, sig);
+
+    const waitMs = txWaitTimeoutMs();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const latest = await connection.getLatestBlockhash('confirmed');
+      const conf = await Promise.race([
+        connection.confirmTransaction(
+          {
+            signature: sig,
+            blockhash: latest.blockhash,
+            lastValidBlockHeight: latest.lastValidBlockHeight,
+          },
+          'confirmed'
+        ),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`Solana confirmTransaction timed out after ${waitMs}ms`)),
+            waitMs
+          );
+        }),
+      ]);
+      if (conf.value.err) {
+        logger.warn('Relay solana deposit failed on-chain', {
+          sig,
+          tradeOrderId: input.tradeOrderId,
+          err: conf.value.err,
+        });
+        return { txHash: sig, status: 0 };
+      }
+      return { txHash: sig, status: 1 };
+    } catch (confErr: any) {
+      logger.warn('Relay solana confirmation pending — signature persisted, status unknown', {
+        sig,
+        tradeOrderId: input.tradeOrderId,
+        error: confErr?.message,
+        waitMs,
+      });
+      return { txHash: sig, status: null };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  } finally {
+    wipeKey(privateKey);
+  }
+}
+
+/**
+ * Relay Tron deposit: verify the TransferContract parameter (exact SUN to
+ * the deposit address), then reuse the plain Tron send. The synthetic
+ * withdrawal id makes the withdrawal-hash persist a safe no-op; the swap
+ * hash is persisted on the trade order below.
+ */
+async function broadcastRelayTron(
+  input: SignSwapBroadcastRequest,
+  network: NetworkConfig
+): Promise<{ txHash: string; status: 0 | 1 | null }> {
+  const r = (input.tx && typeof input.tx === 'object'
+    ? (input.tx as Record<string, any>)
+    : null) as Record<string, any> | null;
+  if (!r || r.kind !== 'relay-deposit' || typeof r.depositAddress !== 'string' || !r.stepData) {
+    throw new PreSendError('Relay tron payload must be a relay-deposit envelope', 400);
+  }
+  const bounds = await loadOrderBounds(input.tradeOrderId);
+  if (bounds.fromTokenAddress !== 'native') {
+    throw new PreSendError('Relay tron origin must be native TRX', 400);
+  }
+  try {
+    verifyRelayTronTransfer(r.stepData?.parameter || r.stepData, {
+      depositAddress: r.depositAddress,
+      orderAmountAtomic: bounds.fromAmountAtomic.toString(),
+    });
+  } catch (err: any) {
+    throw new PreSendError(
+      `Relay tron verification failed: ${err?.message || err}`,
+      400
+    );
+  }
+  const existing = await readTradeOrderTxHash(input.tradeOrderId);
+  if (existing) {
+    logger.info('Relay tron: txHash already present — skipping send', {
+      tradeOrderId: input.tradeOrderId,
+      txHash: existing,
+    });
+    return { txHash: existing, status: null };
+  }
+  const amount = ethers.formatUnits(bounds.fromAmountAtomic, network.decimals ?? 6);
+  const txid = await broadcastTron(
+    {
+      networkId: input.networkId,
+      toAddress: r.depositAddress,
+      amount,
+      withdrawalId: `relay-${input.tradeOrderId}`,
+    },
+    network
+  );
+  await persistTradeOrderTxHashEarly(input.tradeOrderId, txid);
+  return { txHash: txid, status: null };
+}
+
+/**
+ * Relay Bitcoin deposit: verify the deposit amount/currency, then reuse the
+ * plain BTC send to the deposit address. Same persist semantics as Tron.
+ */
+async function broadcastRelayBitcoin(
+  input: SignSwapBroadcastRequest,
+  network: NetworkConfig
+): Promise<{ txHash: string; status: 0 | 1 | null }> {
+  const r = (input.tx && typeof input.tx === 'object'
+    ? (input.tx as Record<string, any>)
+    : null) as Record<string, any> | null;
+  if (!r || r.kind !== 'relay-deposit' || typeof r.depositAddress !== 'string' || !r.stepData) {
+    throw new PreSendError('Relay bitcoin payload must be a relay-deposit envelope', 400);
+  }
+  const bounds = await loadOrderBounds(input.tradeOrderId);
+  if (bounds.fromTokenAddress !== 'native') {
+    throw new PreSendError('Relay bitcoin origin must be native BTC', 400);
+  }
+  try {
+    verifyRelayBitcoinDeposit(r.stepData || {}, {
+      depositAddress: r.depositAddress,
+      orderAmountAtomic: bounds.fromAmountAtomic.toString(),
+    });
+  } catch (err: any) {
+    throw new PreSendError(
+      `Relay bitcoin verification failed: ${err?.message || err}`,
+      400
+    );
+  }
+  const existing = await readTradeOrderTxHash(input.tradeOrderId);
+  if (existing) {
+    logger.info('Relay bitcoin: txHash already present — skipping send', {
+      tradeOrderId: input.tradeOrderId,
+      txHash: existing,
+    });
+    return { txHash: existing, status: null };
+  }
+  const amount = ethers.formatUnits(bounds.fromAmountAtomic, network.decimals ?? 8);
+  const txid = await broadcastBitcoin(
+    {
+      networkId: input.networkId,
+      toAddress: r.depositAddress,
+      amount,
+      withdrawalId: `relay-${input.tradeOrderId}`,
+    },
+    network
+  );
+  await persistTradeOrderTxHashEarly(input.tradeOrderId, txid);
+  return { txHash: txid, status: null };
+}
 
 export async function broadcastSwap(
   input: SignSwapBroadcastRequest
@@ -1455,12 +2222,29 @@ export async function broadcastSwap(
     networkType: network.type,
   });
 
+  if (input.provider === 'relay' && network.type === 'solana') {
+    return broadcastRelaySolana(input, network);
+  }
+
   if (input.provider === 'jupiter' || network.type === 'solana') {
     return broadcastJupiterOrSolanaSwap(input, network);
   }
 
   if (network.type === 'evm') {
     return broadcastEvmSwap(input, network);
+  }
+
+  if (network.type === 'tron') {
+    if (input.provider === 'relay') {
+      return broadcastRelayTron(input, network);
+    }
+    return broadcastTronSwap(input, network);
+  }
+
+  if (network.type === 'bitcoin') {
+    if (input.provider === 'relay') {
+      return broadcastRelayBitcoin(input, network);
+    }
   }
 
   throw new PreSendError(
@@ -1472,8 +2256,7 @@ export async function broadcastSwap(
 /**
  * Fail closed if the aggregator returned an approval-only or multi-tx plan.
  * This codebase broadcasts a single swap tx; separate ERC-20 approve is not
- * sequenced here. Prefer 0x allowance-holder or Rango payloads that already
- * embed a spendable swap (or ensure hot-wallet allowances are pre-set offline).
+ * sequenced here. Ensure hot-wallet router allowances are pre-set offline.
  */
 function assertSingleExecutableEvmSwapTx(raw: unknown): void {
   if (raw == null || typeof raw !== 'object') return;
@@ -1482,7 +2265,7 @@ function assertSingleExecutableEvmSwapTx(raw: unknown): void {
   if (Array.isArray(raw)) {
     if (raw.length > 1) {
       throw new PreSendError(
-        'Multi-transaction swap payload not supported (approve+swap must be pre-sequenced or use allowance-holder)',
+        'Multi-transaction swap payload not supported (approve+swap must be pre-sequenced (pre-set the router allowance offline))',
         400
       );
     }
@@ -1496,7 +2279,7 @@ function assertSingleExecutableEvmSwapTx(raw: unknown): void {
 
   if (Array.isArray(r.transactions) && r.transactions.length > 1) {
     throw new AppError(
-      'Multi-transaction swap payload not supported (approve+swap must be pre-sequenced or use allowance-holder)',
+      'Multi-transaction swap payload not supported (approve+swap must be pre-sequenced (pre-set the router allowance offline))',
       400
     );
   }
@@ -1510,7 +2293,7 @@ function assertSingleExecutableEvmSwapTx(raw: unknown): void {
     // Pure approval txs are not swaps — refuse silent broadcast that does not settle the order.
     if (!r.data && !r.input && !r.tx && !r.transaction) {
       throw new AppError(
-        'Approval-only swap payload refused; set allowance offline or use allowance-holder route',
+        'Approval-only swap payload refused; pre-set the router allowance offline',
         400
       );
     }
@@ -1539,7 +2322,7 @@ function unwrapEvmSwapTx(raw: unknown): {
   }
   const r = raw as Record<string, any>;
 
-  // Direct 0x / allowance-holder shape
+  // Direct aggregator shape { to, data, … }
   if (r.to && (r.data || r.input)) {
     return {
       to: String(r.to),
@@ -1557,7 +2340,7 @@ function unwrapEvmSwapTx(raw: unknown): {
   if (r.transaction && typeof r.transaction === 'object') {
     return unwrapEvmSwapTx(r.transaction);
   }
-  // Rango: { tx: { … } } or { data: { … } }
+  // Wrapped: { tx: { … } } or { data: { … } }
   if (r.tx && typeof r.tx === 'object') {
     return unwrapEvmSwapTx(r.tx);
   }
@@ -1708,15 +2491,14 @@ async function broadcastEvmSwapLocked(
 
 /**
  * Jupiter returns a base64-encoded VersionedTransaction.
- * Rango Solana may return similar base64 or a wrapped object.
  */
 async function broadcastJupiterOrSolanaSwap(
   input: SignSwapBroadcastRequest,
   network: NetworkConfig
 ): Promise<{ txHash: string; status: 0 | 1 | null }> {
-  const rpc = config.rpc.solana;
+  const rpc = solanaRpcFor(network.id);
   if (!rpc) {
-    throw new AppError('SOLANA_RPC_URL is not configured', 500);
+    throw new AppError(`Solana RPC URL is not configured for ${network.id}`, 500);
   }
 
   let b64: string | null = null;
@@ -1871,7 +2653,7 @@ async function broadcastJupiterOrSolanaSwap(
       }
 
       // Require at least one known Jupiter/system program for jupiter provider
-      if (input.provider === 'jupiter' || input.provider === 'rango') {
+      if (input.provider === 'jupiter') {
         const hasKnown = keys.some(
           (k) => allow.has(k) || k.startsWith('JUP')
         );
@@ -2257,7 +3039,7 @@ async function sweepSolanaNative(
       );
     }
 
-    const conn = new Connection(config.rpc.solana, 'confirmed');
+    const conn = new Connection(solanaRpcFor(network.id), 'confirmed');
     const lamports = await conn.getBalance(kp.publicKey);
     // Drain to zero minus a realistic fee reserve. Leaving 10_000 lamports
     // is below rent-exempt minimum and the transfer gets rejected.
@@ -2310,7 +3092,7 @@ async function sweepTronNative(
     const derived = deriveDepositPrivateKey(mnemonic, network, input.derivationIndex);
     privateKey = derived.privateKey;
     const hex = Buffer.from(privateKey).toString('hex');
-    const tronWeb = new (TronWeb as any)({
+    const tronWeb = new TronWeb({
       fullHost: host,
       headers: config.rpc.tronApiKey
         ? { 'TRON-PRO-API-KEY': config.rpc.tronApiKey }

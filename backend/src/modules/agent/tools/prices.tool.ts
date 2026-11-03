@@ -57,8 +57,9 @@ export async function pricesTool(
   }
 
   try {
-    const { getHubPrice, listAllHubKeys, listHubPrices, readSharedMarks, resolveAssetKey } =
+    const { getHubPrice, listAllHubKeys, listHubPrices, readSharedMarks } =
       await import('../../../services/trading/priceHub.service');
+    const { resolveCrewAssetKey, isAmbiguousAssetError } = await import('../assetResolve');
     const { getPriceBatch } = await import('../../../services/trading/price.service');
     const { getTokenSync, warmTokenCache, getActiveTokens } = await import(
       '../../../services/blockchain/tokenRegistry.service'
@@ -71,12 +72,45 @@ export async function pricesTool(
     let marks: unknown;
 
     if (symbols.length > 0 || parsed.data.tokenId || parsed.data.networkId) {
-      const requests: Array<{ symbol: string; key: string }> = symbols.map((s) => ({
-        symbol: s,
-        key: resolveAssetKey(s),
-      }));
+      // Chain + asset identity: bare multi-chain symbols (USDC, WETH, ...)
+      // fail loudly here instead of resolving to a wrong-chain key.
+      const requests: Array<{ symbol: string; key: string }> = [];
+      for (const s of symbols) {
+        try {
+          const r = await resolveCrewAssetKey({ symbol: s, networkId: parsed.data.networkId });
+          requests.push({ symbol: s, key: r.key });
+        } catch (err) {
+          if (isAmbiguousAssetError(err)) {
+            return {
+              toolCallId: '',
+              name: 'prices',
+              ok: false,
+              error: (err as Error).message,
+              durationMs: Date.now() - started,
+            };
+          }
+          throw err;
+        }
+      }
       if (parsed.data.tokenId) {
-        const key = `token:${parsed.data.tokenId}`;
+        let key = `token:${parsed.data.tokenId}`;
+        try {
+          const r = await resolveCrewAssetKey({
+            tokenId: parsed.data.tokenId,
+            networkId: parsed.data.networkId,
+          });
+          key = r.key;
+        } catch (err) {
+          // A tokenId contradicting networkId is a loud error; unknown ids
+          // fall back inside the resolver and null-mark below as before.
+          return {
+            toolCallId: '',
+            name: 'prices',
+            ok: false,
+            error: (err as Error).message,
+            durationMs: Date.now() - started,
+          };
+        }
         if (!requests.some((r) => r.key === key)) {
           requests.push({ symbol: parsed.data.tokenId, key });
         }

@@ -123,11 +123,23 @@ export const pricesToolParamsSchema = z.object({
   tokenId: z.string().optional(),
 });
 
+/**
+ * Quote-only native coercion: the model sometimes writes the STRING "null"
+ * for a native leg. Coerce (case-insensitive, trimmed) to real null so the
+ * quote path resolves native instead of throwing "Token null ...".
+ * Deliberately scoped to the simulate (quote-only) schema: money-moving
+ * proposal/order paths stay strict and fail closed on unknown ids.
+ */
+const simulateTokenId = z.preprocess(
+  (v) => (typeof v === 'string' && v.trim().toLowerCase() === 'null' ? null : v),
+  z.string().nullable().optional()
+);
+
 export const simulateToolParamsSchema = z.object({
   fromNetworkId: z.string().min(1),
   toNetworkId: z.string().min(1),
-  fromTokenId: z.string().nullable().optional(),
-  toTokenId: z.string().nullable().optional(),
+  fromTokenId: simulateTokenId,
+  toTokenId: simulateTokenId,
   amount: z.string().min(1),
 });
 

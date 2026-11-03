@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Host helper: build the all-in-one image and run EVERYTHING in one container
-# (terminal SPA on :8080 via nginx + API on :3000 + postgres/redis/signer/
-# worker/approval/agent inside). Override ports: API_PORT=3000 WEB_PORT=8080.
+# behind ONE published port (nginx on :8080 serving the terminal SPA plus a
+# same-origin /api proxy; API/postgres/redis/signer/worker/approval/agent all
+# run inside, unreachable from the host). Override the port: PORT=8080.
 #
 # Usage:
 #   ./docker-start.sh [up|down|restart|logs|status|fresh|demo-user|mnemonic|demo]
@@ -26,8 +27,9 @@ set -euo pipefail
 IMAGE="exchange-allinone:local"
 NAME="exchange-allinone"
 VOLUME="exchange-data"
-PORT="${API_PORT:-3000}"
-WEB_PORT="${WEB_PORT:-8080}"
+# Single published port (nginx). API_PORT/WEB_PORT are honored as legacy
+# aliases so old muscle memory keeps working.
+PORT="${PORT:-${WEB_PORT:-${API_PORT:-8080}}}"
 
 DEMO_EMAIL="${DEMO_EMAIL:-demo@axon.local}"
 DEMO_PASSWORD="${DEMO_PASSWORD:-AxonDemo123}"
@@ -52,14 +54,16 @@ SECRET_KEYS=(
   SIGNER_TIMEOUT_MS SIGNER_TX_WAIT_TIMEOUT_MS
   SIGNER_APPROVAL_PUBLIC_KEY SIGNER_APPROVAL_TOKEN_REQUIRED
   APPROVAL_SHARED_SECRET APPROVAL_ED25519_PRIVATE_KEY APPROVAL_TOKEN_TTL_SEC
-  MUSE_API_KEY MUSE_BASE_URL MUSE_MODEL AGENT_DEMO_MODE
+  MUSE_API_KEY MUSE_BASE_URL MUSE_MODEL AGENT_DEMO_MODE AGENT_CREW_DEADLINE_MS
   MODEL_API_KEY MODEL_BASE_URL MODEL_NAME MODEL_FAST_NAME MODEL_TIMEOUT_MS
   MUSE_FAST_MODEL MUSE_TIMEOUT_MS
   MASTER_MNEMONIC
-  RANGO_API_KEY RANGO_BASE_URL RANGO_DEFAULT_SLIPPAGE RANGO_REFERRER_FEE RANGO_REFERRER_ADDRESS
-  COINGECKO_API_KEY PYTH_HERMES_URL ZEROX_API_KEY
+  LIFI_API_KEY LIFI_BASE_URL SYMBIOSIS_BASE_URL RELAY_BASE_URL
+  SIGNER_ALLOWANCE_TOKENS SIGNER_ALLOWANCE_AMOUNT SIGNER_ALLOWANCES_ON_BOOT
+  COINGECKO_API_KEY PYTH_HERMES_URL
   ETH_RPC_URL SEPOLIA_RPC_URL ARBITRUM_RPC_URL OPTIMISM_RPC_URL BASE_RPC_URL
   POLYGON_RPC_URL BSC_RPC_URL AVALANCHE_RPC_URL BITCOIN_API_URL SOLANA_RPC_URL
+  SOLANA_DEVNET_RPC_URL
   TRON_FULL_HOST TRON_API_KEY
   ALCHEMY_WEBHOOK_ENABLED ALCHEMY_WEBHOOK_SIGNING_KEY
   HELIUS_WEBHOOK_ENABLED HELIUS_WEBHOOK_AUTH_HEADER
@@ -122,12 +126,11 @@ collect_secret_args() {
 cmd="${1:-up}"
 
 wait_ready() {
-  echo "Waiting for readiness (up to 5 min on first boot) ..."
+  echo "Waiting for readiness on :${PORT} (up to 5 min on first boot) ..."
   for _ in $(seq 1 60); do
     if curl -fsS "http://127.0.0.1:${PORT}/ready" > /dev/null 2>&1 \
-       && curl -fsS "http://127.0.0.1:${WEB_PORT}/ready" > /dev/null 2>&1 \
-       && curl -fsS "http://127.0.0.1:${WEB_PORT}/" > /dev/null 2>&1; then
-      echo "API + web liaison are ready."
+       && curl -fsS "http://127.0.0.1:${PORT}/" > /dev/null 2>&1; then
+      echo "Single-port gateway is ready (SPA + /api proxy)."
       return 0
     fi
     sleep 5
@@ -175,10 +178,9 @@ case "$cmd" in
       echo " 'down -v' for a fresh boot — vault key + DB must stay in sync.)"
       docker start "$NAME" > /dev/null
     else
-      echo "Creating container $NAME ..."
+      echo "Creating container $NAME (single published port ${PORT}) ..."
       docker run -d --name "$NAME" \
-        -p "${PORT}:3000" \
-        -p "${WEB_PORT}:80" \
+        -p "${PORT}:80" \
         -v "${VOLUME}:/data" \
         "${SECRETS_ARGS[@]}" \
         "${OVERRIDES[@]}" \
@@ -186,15 +188,15 @@ case "$cmd" in
     fi
     wait_ready
     echo
-    echo "Endpoints:"
-    echo "  Terminal:    http://localhost:${WEB_PORT}/"
-    echo "  API health:  http://localhost:${PORT}/health  (also via web: http://localhost:${WEB_PORT}/health)"
+    echo "Everything behind one port:"
+    echo "  Terminal:    http://localhost:${PORT}/"
+    echo "  API health:  http://localhost:${PORT}/health"
     echo "  API ready:   http://localhost:${PORT}/ready"
     echo "  Swagger:     http://localhost:${PORT}/api/docs"
     echo "  CSRF token:  http://localhost:${PORT}/api/v1/csrf-token"
     echo
-    echo "The SPA talks to /api/* on :${WEB_PORT} — nginx inside the container forwards to the API."
-    echo "Signer's 3100 is localhost-only INSIDE the container (by design)."
+    echo "API :3000, signer :3100, approval :3200, agent :3220, postgres, redis"
+    echo "all run INSIDE the container (nginx forwards /api/*, /health, /ready)."
     echo "Debug inside:  docker exec -it $NAME bash"
     echo "Supervisord:   docker exec -it $NAME supervisorctl -c /etc/supervisor/supervisord-docker.conf status"
     echo "First-boot mnemonic: docker exec $NAME cat /data/wallet-init-first-boot.log"
@@ -232,13 +234,11 @@ case "$cmd" in
   status)
     docker ps -a -f "name=^${NAME}$"
     echo
-    echo "-- endpoint probes --"
-    for ep in "/" "/health" "/ready" "/api/docs.json"; do
-      code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${WEB_PORT}${ep}" || echo "000")"
-      printf "  web:%s%s -> %s\n" "$WEB_PORT" "$ep" "$code"
+    echo "-- endpoint probes (single port ${PORT}) --"
+    for ep in "/" "/health" "/ready" "/api/docs.json" "/api/v1/csrf-token"; do
+      code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${PORT}${ep}" || echo "000")"
+      printf "  :%s%s -> %s\n" "$PORT" "$ep" "$code"
     done
-    code="$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${PORT}/ready" || echo "000")"
-    printf "  api:%s/ready -> %s\n" "$PORT" "$code"
     ;;
 
   fresh)

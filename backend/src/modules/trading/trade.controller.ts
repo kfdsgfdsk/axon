@@ -10,12 +10,19 @@ import {
   getEmergencyProtection,
   confirmOrderFill,
 } from './trade.service';
-import { ValidationError, UnauthorizedError } from '../../utils/errors';
+import {
+  AppError,
+  NotFoundError,
+  ValidationError,
+  UnauthorizedError,
+  priceStaleError,
+} from '../../utils/errors';
 import {
   openPosition,
   closePosition,
   listPositions,
   getPosition,
+  resolveStable,
 } from './beginner.service';
 import {
   getHubPrice,
@@ -32,9 +39,62 @@ import {
 import { warmTokenCache, getActiveTokens } from '../../services/blockchain/tokenRegistry.service';
 import { getActiveNetworks } from '../../services/blockchain/networks';
 import { binanceSymbolFor } from '../../services/trading/price.service';
-import { getDemoBook, isDemoFlag } from '../demo/demoBook';
+import { buildFreshDemoBook, getDemoBook, isDemoFlag } from '../demo/demoBook';
+import {
+  demoBracket,
+  demoCancelOrder,
+  demoClosePosition,
+  demoGetEmergency,
+  demoMarketSwap,
+  demoOpenPosition,
+  demoSetEmergency,
+  getDemoState,
+  getOrSeedDemoState,
+  refreshDemoPositionPnl,
+} from '../demo/demoStore';
+import { normalizeTokenId } from '../balances/balance.service';
+import {
+  DEFAULT_STABLE_BY_NETWORK,
+  getMidWithMeta,
+  getPriceBatch,
+} from '../../services/trading/price.service';
 import config from '../../config';
 import { ForbiddenError, RateLimitError } from '../../utils/errors';
+
+/** Demo flag on trade writes: `?demo=true` or `{ demo: true }` in the body. */
+function wantsDemo(req: Request): boolean {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  return isDemoFlag(req.query.demo) || isDemoFlag(body.demo);
+}
+
+/** Demo positions view: refresh OPEN unrealized PnL from live marks (best-effort). */
+async function demoPositionsView(userId: string, status?: string) {
+  const state = getDemoState(userId);
+  if (state) {
+    const open = state.positions.filter((p) => p.status === 'OPEN');
+    if (open.length > 0) {
+      try {
+        const items = open.map((p) => ({
+          key: p.assetTokenId
+            ? `token:${p.assetTokenId}`
+            : `native:${p.assetNetworkId}`,
+          networkId: p.assetNetworkId,
+          ...(p.assetTokenId ? { tokenId: p.assetTokenId } : {}),
+        }));
+        const metas = await getPriceBatch(items);
+        refreshDemoPositionPnl(state, (key) => {
+          const m = metas.get(key);
+          return m && m.price > 0 ? m.price : null;
+        });
+      } catch {
+        /* keep stored pnl */
+      }
+    }
+  }
+  return (await getDemoBook(userId)).positions.filter(
+    (p) => !status || p.status === status
+  );
+}
 
 /** In-memory per-user SSE connection counter (process-local). */
 const sseConnectionsByUser = new Map<string, number>();
@@ -98,6 +158,41 @@ export async function marketSwap(req: Request, res: Response, next: NextFunction
     if (!parsed.success) {
       throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
     }
+    // Demo flag: same quote path as live, ledger-only settle on mock balances.
+    if (wantsDemo(req)) {
+      const fromTid = normalizeTokenId(parsed.data.fromTokenId);
+      const entryMeta = await getMidWithMeta({
+        networkId: parsed.data.fromNetworkId,
+        tokenId: fromTid || undefined,
+      });
+      const entryPrice =
+        entryMeta && !entryMeta.stale && entryMeta.price > 0
+          ? entryMeta.price
+          : null;
+      if (entryPrice == null) {
+        throw new ValidationError(
+          'Mark price unavailable or stale; cannot evaluate min swap notional (fail closed)'
+        );
+      }
+      const quote = await getSwapQuote({ userId: req.user.id, ...parsed.data });
+      const state = await getOrSeedDemoState(req.user.id, () =>
+        buildFreshDemoBook(req.user!.id)
+      );
+      const order = demoMarketSwap(state, {
+        fromNetworkId: parsed.data.fromNetworkId,
+        fromTokenId: parsed.data.fromTokenId,
+        toNetworkId: parsed.data.toNetworkId,
+        toTokenId: parsed.data.toTokenId,
+        amount: parsed.data.amount,
+        entryPrice,
+        quotedOut: quote.to.estimatedAmount,
+        slippageBps: Math.round(quote.slippagePct * 100),
+        takeProfitPct: parsed.data.takeProfitPct,
+        stopLossPct: parsed.data.stopLossPct,
+      });
+      res.status(201).json({ success: true, data: order });
+      return;
+    }
     const order = await createMarketSwap({ userId: req.user.id, ...parsed.data });
     res.status(201).json({ success: true, data: order });
   } catch (err) {
@@ -112,6 +207,40 @@ export async function placeBracket(req: Request, res: Response, next: NextFuncti
     const parsed = conditionalSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
+    }
+    // Demo flag: same entry mark + economics, locked on mock balances.
+    if (wantsDemo(req)) {
+      const fromTid = normalizeTokenId(parsed.data.tokenId);
+      const toTid =
+        normalizeTokenId(parsed.data.toTokenId) ||
+        DEFAULT_STABLE_BY_NETWORK[parsed.data.networkId] ||
+        '';
+      if (!toTid) {
+        throw new ValidationError('No default stable for this network; pass toTokenId');
+      }
+      const meta = await getMidWithMeta({
+        networkId: parsed.data.networkId,
+        tokenId: fromTid || undefined,
+      });
+      if (meta == null || meta.price <= 0) {
+        throw new AppError('Could not fetch mark price for this asset', 503);
+      }
+      if (meta.stale) throw priceStaleError(meta.ageMs);
+      const state = await getOrSeedDemoState(req.user.id, () =>
+        buildFreshDemoBook(req.user!.id)
+      );
+      const orders = demoBracket(state, {
+        networkId: parsed.data.networkId,
+        tokenId: parsed.data.tokenId,
+        amount: parsed.data.amount,
+        takeProfitPct: parsed.data.takeProfitPct,
+        stopLossPct: parsed.data.stopLossPct,
+        triggerPriceUsd: parsed.data.triggerPriceUsd,
+        toTokenId: toTid,
+        entryPrice: meta.price,
+      });
+      res.status(201).json({ success: true, data: orders });
+      return;
     }
     const orders = await createConditionalOrder({ userId: req.user.id, ...parsed.data });
     res.status(201).json({ success: true, data: orders });
@@ -136,6 +265,15 @@ export async function list(req: Request, res: Response, next: NextFunction) {
 export async function cancel(req: Request, res: Response, next: NextFunction) {
   try {
     if (!req.user) throw new UnauthorizedError();
+    // Demo flag: cancel against the mock book (seeded + demo-placed orders).
+    if (wantsDemo(req)) {
+      const state = await getOrSeedDemoState(req.user.id, () =>
+        buildFreshDemoBook(req.user!.id)
+      );
+      const data = demoCancelOrder(state, req.params.id);
+      res.status(200).json({ success: true, data });
+      return;
+    }
     const data = await cancelOrder(req.user.id, req.params.id);
     res.status(200).json({ success: true, data });
   } catch (err) {
@@ -146,6 +284,13 @@ export async function cancel(req: Request, res: Response, next: NextFunction) {
 export async function getEmergency(req: Request, res: Response, next: NextFunction) {
   try {
     if (!req.user) throw new UnauthorizedError();
+    // Demo flag: mock shield (null until set, like live).
+    if (isDemoFlag(req.query.demo)) {
+      const state = getDemoState(req.user.id);
+      const data = state ? demoGetEmergency(state) : null;
+      res.status(200).json({ success: true, data });
+      return;
+    }
     const data = await getEmergencyProtection(req.user.id);
     res.status(200).json({ success: true, data });
   } catch (err) {
@@ -159,6 +304,15 @@ export async function setEmergency(req: Request, res: Response, next: NextFuncti
     const parsed = emergencySchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
+    }
+    // Demo flag: arm the mock shield (same validation, in-memory only).
+    if (wantsDemo(req)) {
+      const state = await getOrSeedDemoState(req.user.id, () =>
+        buildFreshDemoBook(req.user!.id)
+      );
+      const data = demoSetEmergency(state, { ...parsed.data });
+      res.status(200).json({ success: true, data });
+      return;
     }
     const data = await upsertEmergencyProtection({ userId: req.user.id, ...parsed.data });
     res.status(200).json({ success: true, data });
@@ -210,6 +364,37 @@ export async function openBeginner(req: Request, res: Response, next: NextFuncti
     if (!parsed.success) {
       throw new ValidationError(parsed.error.errors.map((e) => e.message).join('; '));
     }
+    // Demo flag: price-game open on mock balances (BUY/SELL 1-5x, like the seed).
+    if (wantsDemo(req)) {
+      const assetTid = normalizeTokenId(parsed.data.assetTokenId);
+      const stable = await resolveStable(
+        parsed.data.stableNetworkId || parsed.data.assetNetworkId,
+        parsed.data.stableTokenId
+      );
+      const meta = await getMidWithMeta({
+        networkId: parsed.data.assetNetworkId,
+        tokenId: assetTid || undefined,
+      });
+      if (meta == null || meta.price <= 0) {
+        throw new AppError('Mark price unavailable for this asset', 503);
+      }
+      if (meta.stale) throw priceStaleError(meta.ageMs);
+      const state = await getOrSeedDemoState(req.user.id, () =>
+        buildFreshDemoBook(req.user!.id)
+      );
+      const data = demoOpenPosition(state, {
+        side: parsed.data.side,
+        assetNetworkId: parsed.data.assetNetworkId,
+        assetTokenId: parsed.data.assetTokenId,
+        marginStable: parsed.data.marginStable,
+        stableNetworkId: stable.networkId,
+        stableTokenId: stable.tokenId,
+        leverage: parsed.data.leverage,
+        entryPrice: meta.price,
+      });
+      res.status(201).json({ success: true, data });
+      return;
+    }
     const data = await openPosition({ userId: req.user.id, ...parsed.data });
     res.status(201).json({ success: true, data });
   } catch (err) {
@@ -220,6 +405,25 @@ export async function openBeginner(req: Request, res: Response, next: NextFuncti
 export async function closeBeginner(req: Request, res: Response, next: NextFunction) {
   try {
     if (!req.user) throw new UnauthorizedError();
+    // Demo flag: settle at the live mark against mock balances.
+    if (wantsDemo(req)) {
+      const state = await getOrSeedDemoState(req.user.id, () =>
+        buildFreshDemoBook(req.user!.id)
+      );
+      const pos = state.positions.find((p) => p.id === req.params.id);
+      if (!pos) throw new NotFoundError('Position not found');
+      const exitMeta = await getMidWithMeta({
+        networkId: pos.assetNetworkId,
+        tokenId: pos.assetTokenId || undefined,
+      });
+      if (exitMeta == null || exitMeta.price <= 0) {
+        throw new AppError('Mark price unavailable', 503);
+      }
+      if (exitMeta.stale) throw priceStaleError(exitMeta.ageMs);
+      const data = demoClosePosition(state, req.params.id, exitMeta.price);
+      res.status(200).json({ success: true, data });
+      return;
+    }
     const data = await closePosition(req.user.id, req.params.id, 'user_close');
     res.status(200).json({ success: true, data });
   } catch (err) {
@@ -233,7 +437,7 @@ export async function listBeginner(req: Request, res: Response, next: NextFuncti
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
     // Demo flag: this user's seeded positions instead of the real book.
     const data = isDemoFlag(req.query.demo)
-      ? (await getDemoBook(req.user.id)).positions.filter((p) => !status || p.status === status)
+      ? await demoPositionsView(req.user.id, status)
       : await listPositions(req.user.id, status);
     res.status(200).json({ success: true, data });
   } catch (err) {

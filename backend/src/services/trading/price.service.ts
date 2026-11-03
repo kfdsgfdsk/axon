@@ -58,6 +58,7 @@ const CG_ID: Record<string, string> = {
   'native:bsc': 'binancecoin',
   'native:avalanche': 'avalanche-2',
   'native:solana': 'solana',
+  'native:solana-devnet': 'solana', // devnet SOL tracks mainnet SOL for marks
   'native:bitcoin': 'bitcoin',
   'native:tron': 'tron',
 };
@@ -73,11 +74,13 @@ const BINANCE_SYMBOL: Record<string, string> = {
   'native:bsc': 'BNBUSDT',
   'native:avalanche': 'AVAXUSDT',
   'native:solana': 'SOLUSDT',
+  'native:solana-devnet': 'SOLUSDT', // devnet SOL tracks mainnet SOL for marks
   'native:bitcoin': 'BTCUSDT',
   'native:tron': 'TRXUSDT',
   ethereum: 'ETHUSDT',
   sepolia: 'ETHUSDT',
   solana: 'SOLUSDT',
+  'solana-devnet': 'SOLUSDT',
   bitcoin: 'BTCUSDT',
 };
 

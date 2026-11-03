@@ -113,6 +113,35 @@ describe('buildDemoBook', () => {
     for (const l of b.ledger) expect(l.id.startsWith('demo_')).toBe(true);
   });
 
+  test('every stable-bearing chain carries a same-chain stable leg (all users)', () => {
+    // 8 stables skewed 7:1 across two chains: a capped variety pick drops
+    // whole chains for some users; per-chain coverage never does.
+    const many = [
+      ...Array.from({ length: 7 }, (_, i) => ({
+        id: `st${i}-net-a`,
+        symbol: `ST${i}`,
+        networkId: 'net-a',
+        isStable: true,
+      })),
+      { id: 'lone-net-b', symbol: 'LONE', networkId: 'net-b', isStable: true },
+    ];
+    for (let u = 0; u < 20; u++) {
+      const b = buildDemoBook({
+        userId: `coverage-user-${u}`,
+        networks: NETWORKS,
+        tokens: many,
+        priceOf,
+        now: NOW,
+      });
+      const nets = new Set(
+        b.balances.filter((r) => r.tokenId && many.some((t) => t.id === r.tokenId))
+          .map((r) => r.networkId)
+      );
+      expect(nets).toContain('net-a');
+      expect(nets).toContain('net-b');
+    }
+  });
+
   test('differs per user but keeps the same shape', () => {
     const a = book('user-1');
     const b = book('user-2');

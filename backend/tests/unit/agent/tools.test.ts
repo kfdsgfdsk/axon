@@ -182,9 +182,17 @@ describe('simulateTool — quote only, never executes', () => {
 
   test('happy path returns SimulationResult', async () => {
     (tradeService.getSwapQuote as jest.Mock).mockResolvedValue({
-      provider: 'rango',
+      provider: 'lifi',
       to: { estimatedAmount: '100.5' },
     });
+    // Bare symbols resolve on their leg's network (deterministic rule);
+    // the registry must know the token for the leg to quote.
+    const registry = jest.requireMock(
+      '../../../src/services/blockchain/tokenRegistry.service'
+    ) as { getActiveTokens: jest.Mock };
+    registry.getActiveTokens.mockResolvedValue([
+      { id: 'usdc-solana', symbol: 'USDC', networkId: 'solana' },
+    ]);
     const result = await simulateTool(
       {
         fromNetworkId: 'ethereum',
@@ -197,6 +205,9 @@ describe('simulateTool — quote only, never executes', () => {
     );
     expect(result.ok).toBe(true);
     expect(result.name).toBe('simulate');
+    expect(tradeService.getSwapQuote).toHaveBeenCalledWith(
+      expect.objectContaining({ fromTokenId: null, toTokenId: 'usdc-solana' })
+    );
     const data = result.data as any;
     expect(data.ok).toBe(true);
     expect(data.estimatedAmountOut).toBe('100.5');

@@ -8,6 +8,7 @@
 import { getUserBalances, getBalance } from '../../balances/balance.service';
 import type { ToolContext, ToolResult } from '../types';
 import { balancesToolParamsSchema } from '../schemas';
+import { labelBalanceRow } from '../humanize';
 
 export async function balancesTool(
   params: Record<string, unknown>,
@@ -30,12 +31,14 @@ export async function balancesTool(
     // Demo flag: serve the seeded book (same shapes as the ledger reads).
     if (ctx.demoBook) {
       const tid = !tokenId || tokenId === 'native' ? '' : tokenId;
-      const rows = ctx.demoBook.balances.filter(
-        (b) => (!networkId || b.networkId === networkId) && (!networkId || (b.tokenId || '') === tid),
-      );
+      const rows = ctx.demoBook.balances
+        .filter(
+          (b) => (!networkId || b.networkId === networkId) && (!networkId || (b.tokenId || '') === tid),
+        )
+        .map((b) => labelBalanceRow(b));
       // Mirror getBalance: a filtered miss is a zero virtual row, not an error.
       const data: unknown = networkId
-        ? (rows[0] ?? { networkId, tokenId: tid || null, asset: tid || 'native', available: '0', locked: '0', updatedAt: null })
+        ? (rows[0] ?? labelBalanceRow({ networkId, tokenId: tid || null, asset: tid || 'native', available: '0', locked: '0', updatedAt: null }))
         : rows;
       return {
         toolCallId: '',
@@ -48,9 +51,9 @@ export async function balancesTool(
     }
     let data: unknown;
     if (networkId) {
-      data = await getBalance(ctx.principal.userId, networkId, tokenId ?? null);
+      data = labelBalanceRow(await getBalance(ctx.principal.userId, networkId, tokenId ?? null));
     } else {
-      data = await getUserBalances(ctx.principal.userId);
+      data = (await getUserBalances(ctx.principal.userId)).map((b) => labelBalanceRow(b));
     }
     return {
       toolCallId: '',

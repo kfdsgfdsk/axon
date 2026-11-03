@@ -16,6 +16,7 @@ import logger from '../../utils/logger';
 import prisma from '../../lib/prisma';
 import * as signerService from './service';
 import { acquireSignerProcessLock } from './broadcast';
+import { ensureRouterAllowances } from './allowances';
 import type {
   SignBroadcastRequest,
   SignSwapBroadcastRequest,
@@ -292,5 +293,10 @@ export function startSignerServer(): void {
       port,
       vaultKeyConfigured: Boolean(config.wallet.encryptionKey),
     });
+    // Pre-set router allowances in the background (best-effort, never
+    // blocks readiness; swaps fail closed until approvals land).
+    void ensureRouterAllowances().catch((err: any) =>
+      logger.warn('allowances: boot job crashed', { error: err?.message })
+    );
   });
 }

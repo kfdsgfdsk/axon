@@ -65,12 +65,9 @@ export const TOKEN_SEED: TokenSeed[] = [
   { symbol: 'SHIB', name: 'Shiba Inu', networkId: 'ethereum', contractAddress: '0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce', binanceSymbol: 'SHIBUSDT', decimals: 18, standard: 'erc20', coingeckoId: 'shiba-inu' },
   { symbol: 'stETH', name: 'Lido Staked ETH', networkId: 'ethereum', contractAddress: '0xae7ab96520de3a18e5e111b5eaab095312d7fe84', decimals: 18, standard: 'erc20', coingeckoId: 'staked-ether' },
   { symbol: 'rETH', name: 'Rocket Pool ETH', networkId: 'ethereum', contractAddress: '0xae78736cd615f374d3085123a210448e74fc6393', decimals: 18, standard: 'erc20', coingeckoId: 'rocket-pool-eth' },
-  // Sepolia (Ethereum testnet) — for on-chain testing
-  // Official Circle USDC: https://developers.circle.com/stablecoins/docs/usdc-on-test-networks
-  { symbol: 'USDC', name: 'USD Coin', networkId: 'sepolia', contractAddress: '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238', decimals: 6, standard: 'erc20', coingeckoId: 'usd-coin', isStable: true },
-  { symbol: 'WETH', name: 'Wrapped Ether', networkId: 'sepolia', contractAddress: '0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14', binanceSymbol: 'ETHUSDT', decimals: 18, standard: 'erc20', coingeckoId: 'weth' },
-  // Common community / faucet tokens frequently used in Sepolia testing
-  { symbol: 'LINK', name: 'Chainlink', networkId: 'sepolia', contractAddress: '0x779877A7B0D9E8603169DdbD7836e478b4624789', binanceSymbol: 'LINKUSDT', decimals: 18, standard: 'erc20', coingeckoId: 'chainlink' },
+  // NOTE: solana-devnet is the only supported testnet (native SOL only;
+  // devnet SPLs can be added at runtime via the admin token API). No
+  // testnet seeds — Sepolia was retired.
   // Arbitrum
   { symbol: 'USDT', name: 'Tether USD', networkId: 'arbitrum', contractAddress: '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9', decimals: 6, standard: 'erc20', coingeckoId: 'tether', isStable: true },
   { symbol: 'USDC', name: 'USD Coin', networkId: 'arbitrum', contractAddress: '0xaf88d065e77c8cc2239327c5edb3a432268e5831', decimals: 6, standard: 'erc20', coingeckoId: 'usd-coin', isStable: true },

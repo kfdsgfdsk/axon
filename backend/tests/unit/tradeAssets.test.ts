@@ -18,7 +18,7 @@ jest.mock('../../src/utils/logger', () => ({
 
 jest.mock('../../src/config', () => ({
   __esModule: true,
-  default: { trading: {}, rango: {} },
+  default: { trading: {} },
 }));
 
 jest.mock('../../src/services/blockchain/networks', () => ({

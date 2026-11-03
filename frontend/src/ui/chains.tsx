@@ -10,7 +10,8 @@ import { uniswapLogoOf, useUniswapLogos } from '../lib/tokenLogos';
 
 export type ChainId =
   | 'ethereum' | 'solana' | 'bitcoin' | 'tron'
-  | 'arbitrum' | 'optimism' | 'base' | 'polygon' | 'bsc' | 'avalanche';
+  | 'arbitrum' | 'optimism' | 'base' | 'polygon' | 'bsc' | 'avalanche'
+  | 'solana-devnet';
 
 export interface ChainMeta {
   id: ChainId;
@@ -32,6 +33,7 @@ export const CHAIN_META: Record<ChainId, ChainMeta> = {
   polygon: { id: 'polygon', name: 'Polygon', sym: 'MATIC', color: '#b088ff', requiredConf: 128, addrHint: '0x…' },
   bsc: { id: 'bsc', name: 'BNB Smart Chain', sym: 'BNB', color: '#f0b90b', requiredConf: 15, addrHint: '0x…' },
   avalanche: { id: 'avalanche', name: 'Avalanche', sym: 'AVAX', color: '#ff7a7a', requiredConf: 12, addrHint: '0x…' },
+  'solana-devnet': { id: 'solana-devnet', name: 'Solana Devnet', sym: 'SOL', color: '#3ddc84', requiredConf: 1, addrHint: 'base58…' },
 };
 
 /** Deposit networks: every active mainnet backend network (testnets excluded). */
@@ -232,9 +234,9 @@ export function ChainLogo({ chain, size = 28 }: { chain: string; size?: number }
     case 'arbitrum':
     case 'optimism':
     case 'base':
-    case 'sepolia':
       return <EthMark size={size} />;
-    case 'solana': return <SolMark size={size} />;
+    case 'solana':
+    case 'solana-devnet': return <SolMark size={size} />;
     case 'bitcoin': return <BtcMark size={size} />;
     case 'tron': return <TronMark size={size} />;
     case 'polygon': return <MaticMark size={size} />;

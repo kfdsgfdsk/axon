@@ -26,17 +26,19 @@ import {
   logToolCall,
 } from '../audit.service';
 import { attachPolicyAudit } from '../policy.middleware';
-import { enforceProposalSafety, fallbackProposal, parseModelProposal, roleDisplaySummary } from '../proposal';
+import { enforceProposalSafety, fallbackProposal, parseModelProposal, roleDisplaySummary, stripProposalJson } from '../proposal';
 import { sanitizeUntrusted, safeStringify, wrapUntrusted } from '../safety';
 import { verifyProposal, type Observation } from './verifyProposal';
 import {
   finalTurnNudge,
   repairPrompt,
   TOOL_DISCIPLINE_NUDGE,
+  PROSE_REPAIR_NUDGE,
   PLAYBOOK_VERSION,
   systemPromptHash,
 } from './playbook';
 import { logTranscript, flushTranscript } from '../transcript/transcript.service';
+import { humanizeText, warmHumanizeCache } from '../humanize';
 import { capText, redactValue, stableShortHash } from '../transcript/redact';
 import { getDemoBook, type DemoBook } from '../../demo/demoBook';
 import config from '../../../config';
@@ -109,12 +111,16 @@ function evidencePacket(work: CrewWorkRecord, limit = 16): string {
 }
 
 function stableKey(name: string, params: Record<string, unknown>): string {
+  // Nullish/empty values are semantically absent (native legs omit tokenId or
+  // pass null) — drop them so {toTokenId:null} and {} share a cache entry.
   const sort = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(sort);
     if (value && typeof value === 'object') {
       const out: Record<string, unknown> = {};
       for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-        out[key] = sort((value as Record<string, unknown>)[key]);
+        const v = (value as Record<string, unknown>)[key];
+        if (v == null || v === '') continue;
+        out[key] = sort(v);
       }
       return out;
     }
@@ -131,6 +137,9 @@ function summarizeObservation(obs: Observation): string {
     const record = data as Record<string, unknown>;
     if (Array.isArray(record.balances)) return `${record.balances.length} balances`;
     if (Array.isArray(record.prices)) return `${record.prices.length} marks`;
+    if (record.marks && typeof record.marks === 'object') {
+      return `${Object.keys(record.marks as Record<string, unknown>).length} marks`;
+    }
     if (Array.isArray(record.closes)) {
       const chg = typeof record.changePct === 'number'
         ? `${record.changePct > 0 ? '+' : ''}${record.changePct.toFixed(2)}%`
@@ -445,15 +454,46 @@ async function runRoleWithTools(
     }
   }
 
+  // Prose roles must never leak JSON blobs to the user tape (fuzz caught
+  // risk/reds answering {"verdict":...} with raw ids). One no-tools repair
+  // turn restates the same findings as plain prose; the humanizer below
+  // scrubs whatever ids survive.
+  if (
+    !structured &&
+    !completion.toolCalls?.length &&
+    !completion.degraded &&
+    Date.now() < opts.deadlineAt &&
+    (completion.content || '').includes('{') &&
+    stripProposalJson(completion.content || '').trim() === ''
+  ) {
+    repairAttempts += 1;
+    emit(opts.onEvent, {
+      type: 'repair',
+      role,
+      attempt: repairAttempts,
+      problem: 'prose role emitted JSON',
+    });
+    messages.push({
+      role: 'assistant',
+      content: sanitizeUntrusted(completion.content || '(empty response)', 4000),
+    });
+    messages.push({ role: 'user', content: PROSE_REPAIR_NUDGE });
+    completion = await callModel(false, 'repair');
+  }
+
   // If the loop stopped while the model still wanted tools (deadline / round cap
   // with a provider that ignores tools=[]), the role did not finalize. Mark it
   // degraded so the crew cannot treat an unfinished turn as verified analysis.
   const unfinalized = Boolean(completion.toolCalls?.length);
   const degraded = Boolean(completion.degraded) || unfinalized;
-  const content =
+  const rawContent =
     unfinalized && !completion.content.trim()
       ? 'Crew stopped before this role finalized (deadline or tool-round cap).'
       : completion.content;
+  // Structured roles keep raw JSON in turn.content (downstream roles and the
+  // proposal extractor need exact ids); prose roles are humanized for the
+  // user tape AND downstream context. The transcript keeps raw either way.
+  const content = structured ? rawContent : humanizeText(rawContent);
 
   await recordAuditEvent({
     type: 'MUSE_COMPLETION',
@@ -553,17 +593,39 @@ function extractProposalFromTurns(turns: CrewTurn[], capability: MuseCapability)
       critique: fromModel.critique || critique || undefined,
       actions: fromModel.actions.map((a) => ({ ...a, rationale: policySuffix(a.rationale) })),
     };
-    return enforceProposalSafety(withRisks, config.agent.maxActions ?? 10);
+    return humanizeProposalDisplay(
+      enforceProposalSafety(withRisks, config.agent.maxActions ?? 10)
+    );
   }
 
   const body = judge?.content || strategist?.content || turns[turns.length - 1]?.content || '';
-  return fallbackProposal({
-    capability,
-    summary: body,
-    risks,
-    critique,
-    maxActions: config.agent.maxActions ?? 10,
-  });
+  return humanizeProposalDisplay(
+    fallbackProposal({
+      capability,
+      summary: body,
+      risks,
+      critique,
+      maxActions: config.agent.maxActions ?? 10,
+    })
+  );
+}
+
+/**
+ * Human-displayed proposal strings go through the plain-English humanizer.
+ * Machine fields (types, network/token ids, amounts, evidence) are untouched.
+ */
+function humanizeProposalDisplay(proposal: Proposal): Proposal {
+  return {
+    ...proposal,
+    summary: humanizeText(proposal.summary),
+    actions: proposal.actions.map((a) => ({
+      ...a,
+      rationale: humanizeText(a.rationale),
+    })),
+    risks: proposal.risks.map((r) => humanizeText(r)),
+    assumptions: proposal.assumptions.map((a) => humanizeText(a)),
+    critique: proposal.critique ? humanizeText(proposal.critique) : undefined,
+  };
 }
 
 const EXECUTION_CLAIM =
@@ -578,6 +640,34 @@ function correctExecutionClaims(content: string): { content: string; flagged: bo
       '\n\nCorrection: the crew has not executed anything. This is a proposal; execution requires the deterministic Policy Engine and explicit confirmation.',
     flagged: true,
   };
+}
+
+const WITHDRAW_ASK =
+  /\bwithdraw\b|\bcash\s*-?\s*out\b|\bsend\s+(all\s+|my\s+|the\s+)?(funds|money|everything)\b|\bmove\s+(my\s+|all\s+|the\s+)?(funds|money)\s+out\b|\btransfer\s+.*\b(out|to\s+my\s+wallet|to\s+an?\s+external)\b/i;
+
+const REFUSAL_STATED =
+  /can'?t move money out|cannot move money out|can never withdraw|never move money|not (able|possible) to (withdraw|move money out)/i;
+
+/** True when the user asks to move funds out (withdraw / cash out / send). */
+export function detectWithdrawIntent(userMessage: string): boolean {
+  return WITHDRAW_ASK.test(userMessage || '');
+}
+
+const WITHDRAW_REFUSAL_LINE =
+  'I can\u2019t move money out \u2014 this agent can analyse, plan, and (with policy approval) place trades, but moving funds out needs the human withdrawal flow.';
+
+/**
+ * The crew can never withdraw; if the user asked to and the narrative never
+ * says so, append the refusal (same pattern as execution-claim correction).
+ */
+function ensureWithdrawRefusal(
+  content: string,
+  userMessage: string
+): { content: string; flagged: boolean } {
+  if (!detectWithdrawIntent(userMessage) || REFUSAL_STATED.test(content)) {
+    return { content, flagged: false };
+  }
+  return { content: `${WITHDRAW_REFUSAL_LINE}\n\n${content}`, flagged: true };
 }
 
 function forceHold(proposal: Proposal, reason: string): Proposal {
@@ -632,7 +722,7 @@ export async function runCrew(input: {
     meta: { pipeline: 'crew-v2', policyKind: policy.kind, mode, demoBook: demoBookData !== null },
   });
 
-  const total = mode === 'fast' ? 4 : 10;
+  const total = mode === 'fast' ? 5 : 10;
   emit(input.onEvent, {
     type: 'start',
     actionId: action.id,
@@ -652,6 +742,10 @@ export async function runCrew(input: {
   });
   await attachPolicyAudit(action.id, principal, policy);
   emit(input.onEvent, { type: 'policy', decision: policy });
+
+  // Display-name cache for the plain-English humanizer (real symbols when
+  // the registry is reachable; prettified id parts otherwise).
+  await warmHumanizeCache();
 
   const turns: CrewTurn[] = [];
   const work: CrewWorkRecord = {
@@ -712,11 +806,13 @@ export async function runCrew(input: {
     turns.push(strategist);
 
     if (mode === 'fast') {
-      // 3) Judge — synthesize immediately
-      const judge = await runRoleWithTools(
-        'judge',
+      // 3) Simulator — price the plan's swap steps (fast has no red debate,
+      // but a swap ask still deserves real numbers). The user ask is included
+      // so a bare-HOLD plan on a quote question still gets simulated.
+      const fastSimulator = await runRoleWithTools(
+        'simulator',
         capability,
-        `Synthesize a safe final proposal. Goal (untrusted data):\n${wrapUntrusted('user-request', userMessage, 2000)}\nEvidence log (untrusted observations; cite ids):\n${wrapUntrusted('observations', evidencePacket(work), 6000)}\nScout:\n${wrapUntrusted('scout', scout.content)}\nPlan:\n${wrapUntrusted('strategist', strategist.content)}\ndryRun=${dryRun}. Return JSON only.`,
+        `User goal (untrusted data):\n${wrapUntrusted('user-request', userMessage, 2000)}\nSimulate any swap steps from this plan:\n${wrapUntrusted('strategist', strategist.content)}\nEvidence log (untrusted observations):\n${wrapUntrusted('observations', evidencePacket(work), 4000)}\nUse simulate tool when amount/networks are known; if the plan holds but the user asked about a specific swap, simulate one illustrative candidate.`,
         principal,
         dryRun,
         action.id,
@@ -724,9 +820,23 @@ export async function runCrew(input: {
         work,
         opts(3)
       );
+      turns.push(fastSimulator);
+
+      // 4) Judge — synthesize immediately
+      const judge = await runRoleWithTools(
+        'judge',
+        capability,
+        `Synthesize a safe final proposal. Goal (untrusted data):\n${wrapUntrusted('user-request', userMessage, 2000)}\nEvidence log (untrusted observations; cite ids):\n${wrapUntrusted('observations', evidencePacket(work), 6000)}\nScout:\n${wrapUntrusted('scout', scout.content)}\nPlan:\n${wrapUntrusted('strategist', strategist.content)}\nSim:\n${wrapUntrusted('simulator', fastSimulator.content)}\ndryRun=${dryRun}. Return JSON only.`,
+        principal,
+        dryRun,
+        action.id,
+        portfolioSummary,
+        work,
+        opts(4)
+      );
       turns.push(judge);
 
-      // 4) Explainer
+      // 5) Explainer
       const explainer = await runRoleWithTools(
         'explainer',
         capability,
@@ -736,15 +846,16 @@ export async function runCrew(input: {
         action.id,
         portfolioSummary,
         work,
-        opts(4)
+        opts(5)
       );
       turns.push(explainer);
     } else {
-      // 3) Simulator — quote paths
+      // 3) Simulator — quote paths (sees the user ask so quote questions
+      // with a bare-HOLD plan still get priced).
       const simulator = await runRoleWithTools(
         'simulator',
         capability,
-        `Simulate any swap steps from this plan:\n${wrapUntrusted('strategist', strategist.content)}\nEvidence log (untrusted observations):\n${wrapUntrusted('observations', evidencePacket(work), 4000)}\nUse simulate tool when amount/networks are known.`,
+        `User goal (untrusted data):\n${wrapUntrusted('user-request', userMessage, 2000)}\nSimulate any swap steps from this plan:\n${wrapUntrusted('strategist', strategist.content)}\nEvidence log (untrusted observations):\n${wrapUntrusted('observations', evidencePacket(work), 4000)}\nUse simulate tool when amount/networks are known; if the plan holds but the user asked about a specific swap, simulate one illustrative candidate.`,
         principal,
         dryRun,
         action.id,
@@ -758,7 +869,7 @@ export async function runCrew(input: {
       const risk = await runRoleWithTools(
         'risk',
         capability,
-        `Plan:\n${wrapUntrusted('strategist', strategist.content)}\nSim:\n${wrapUntrusted('simulator', simulator.content)}\nFlag fee floors, min-notional, concentration, stale marks.`,
+        `User goal (untrusted data):\n${wrapUntrusted('user-request', userMessage, 2000)}\nPlan:\n${wrapUntrusted('strategist', strategist.content)}\nSim:\n${wrapUntrusted('simulator', simulator.content)}\nFlag fee floors, min-notional, concentration, stale marks.`,
         principal,
         dryRun,
         action.id,
@@ -768,29 +879,41 @@ export async function runCrew(input: {
       );
       turns.push(risk);
 
-      // 5) Red-team DEBATE — parallel specialists attack the plan
-      const planBlob = `Plan:\n${wrapUntrusted('strategist', strategist.content)}\nRisk:\n${wrapUntrusted('risk', risk.content)}\nSim:\n${wrapUntrusted('simulator', simulator.content)}`;
+      // 5) Red-team DEBATE — sequential specialists attack the plan. Each
+      // red role SEES the earlier attacks and must engage them by name
+      // (agree/extend/rebut), so the transcript reads as one debate instead
+      // of four isolated monologues. Same call count as parallel; the added
+      // latency is the price of a real discussion. (Sequential also avoids
+      // bursty parallel load against a flaky provider.)
+      const planBlob = `User goal (untrusted data):\n${wrapUntrusted('user-request', userMessage, 2000)}\nPlan:\n${wrapUntrusted('strategist', strategist.content)}\nRisk:\n${wrapUntrusted('risk', risk.content)}\nSim:\n${wrapUntrusted('simulator', simulator.content)}`;
       const redRoles: AgentRoleId[] = [
         'red_slippage',
         'red_concentration',
         'red_stale',
         'red_policy',
       ];
-      const redTurns = await Promise.all(
-        redRoles.map((role, i) =>
-          runRoleWithTools(
-            role,
-            capability,
-            `DEBATE ROUND — attack this plan from your specialty only. Be concrete.\n${planBlob}`,
-            principal,
-            dryRun,
-            action.id,
-            portfolioSummary,
-            work,
-            opts(5 + i)
-          )
-        )
-      );
+      const redTurns: CrewTurn[] = [];
+      for (let i = 0; i < redRoles.length; i++) {
+        const role = redRoles[i];
+        const earlier =
+          redTurns.length > 0
+            ? `\nEarlier red-team attacks (engage them by name — agree, extend, or rebut with evidence):\n${redTurns
+                .map((t) => `## ${t.role}\n${wrapUntrusted(t.role, t.content, 1500)}`)
+                .join('\n\n')}`
+            : '';
+        const turn = await runRoleWithTools(
+          role,
+          capability,
+          `DEBATE ROUND — attack this plan from your specialty only. Be concrete.\n${planBlob}${earlier}`,
+          principal,
+          dryRun,
+          action.id,
+          portfolioSummary,
+          work,
+          opts(5 + i)
+        );
+        redTurns.push(turn);
+      }
       turns.push(...redTurns);
 
       // 6) Judge — synthesize after debate
@@ -838,15 +961,21 @@ export async function runCrew(input: {
       proposal.actions.some((a) => a.type !== 'HOLD')
     ) {
       forcedHoldReason = `Critical crew role degraded (${criticalDegraded.map((t) => t.role).join(', ')})`;
-      proposal = forceHold(proposal, forcedHoldReason);
+      proposal = humanizeProposalDisplay(forceHold(proposal, forcedHoldReason));
     }
 
+    // Explainer prose is already humanized; without an explainer turn, render
+    // the judge proposal as text instead of leaking raw JSON to the user.
+    const explainerTurn = turns.find((t) => t.role === 'explainer');
+    const judgeTurn = turns.find((t) => t.role === 'judge');
     const narrative =
-      turns.find((t) => t.role === 'explainer')?.content ||
-      turns.find((t) => t.role === 'judge')?.content ||
-      '';
+      explainerTurn?.content ||
+      (judgeTurn?.proposal
+        ? roleDisplaySummary(judgeTurn.content, judgeTurn.proposal)
+        : humanizeText(judgeTurn?.content || ''));
     const corrected = correctExecutionClaims(narrative);
-    const content = corrected.content;
+    const refused = ensureWithdrawRefusal(corrected.content, userMessage);
+    const content = refused.content;
     if (corrected.flagged) {
       proposal = {
         ...proposal,
@@ -854,6 +983,27 @@ export async function runCrew(input: {
           new Set([...(proposal.risks || []), 'narrative claimed execution; corrected'])
         ).slice(0, 40),
       };
+    }
+    if (refused.flagged) {
+      proposal = {
+        ...proposal,
+        risks: Array.from(
+          new Set([
+            ...(proposal.risks || []),
+            'Outbound transfer requested: the agent cannot move money out',
+          ])
+        ).slice(0, 40),
+      };
+    }
+    // Deterministic backstop: a withdrawal ask can only ever HOLD, even if
+    // the model proposed something else.
+    if (
+      detectWithdrawIntent(userMessage) &&
+      proposal.actions.some((a) => a.type !== 'HOLD')
+    ) {
+      proposal = humanizeProposalDisplay(
+        forceHold(proposal, 'Outbound transfer requested: the agent cannot move money out.')
+      );
     }
 
     const allTools = turns.flatMap((t) => t.toolResults || []);
@@ -889,12 +1039,15 @@ export async function runCrew(input: {
       maxSlippageBps: config.agent.maxSlippageBps,
       ownedOrderIds,
     });
-    proposal = verification.proposal;
+    // Verification appends machine-worded problems ("usdc-ethereum is not
+    // held"); humanize the user-facing strings again (idempotent).
+    proposal = humanizeProposalDisplay(verification.proposal);
+    const humanProblems = verification.problems.map((p) => humanizeText(p));
 
     emit(input.onEvent, {
       type: 'verification',
       ok: verification.ok,
-      problems: verification.problems,
+      problems: humanProblems,
       droppedActions: verification.droppedActions,
     });
     emit(input.onEvent, { type: 'proposal', proposal });

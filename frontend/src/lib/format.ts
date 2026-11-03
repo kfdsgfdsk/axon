@@ -106,6 +106,7 @@ export function symbolOf(networkId: string | null | undefined, tokenId?: string 
     optimism: 'ETH',
     base: 'ETH',
     polygon: 'MATIC',
+    'solana-devnet': 'SOL',
   };
   return map[networkId] || networkId.slice(0, 6).toUpperCase();
 }

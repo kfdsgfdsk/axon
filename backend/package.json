@@ -13,6 +13,8 @@
     "prisma:studio": "prisma studio",
     "job:deposit-scanner": "NODE_OPTIONS='--dns-result-order=ipv4first' ts-node src/jobs/depositScanner.job.ts",
     "crew:live": "NODE_OPTIONS='--dns-result-order=ipv4first' ts-node --transpile-only scripts/crew-live-scenarios.ts",
+    "routes:check": "NODE_OPTIONS='--dns-result-order=ipv4first' ts-node --transpile-only --compiler-options '{\"module\":\"commonjs\"}' scripts/check-swap-readiness.ts",
+    "crew:fuzz": "NODE_OPTIONS='--dns-result-order=ipv4first' ts-node --transpile-only --compiler-options '{\"module\":\"commonjs\"}' scripts/crew-fuzz.ts",
     "wallet:init": "ts-node src/scripts/initMasterWallet.ts",
     "tokens:seed": "ts-node src/scripts/seedTokens.ts",
     "job:trade-monitor": "NODE_OPTIONS='--dns-result-order=ipv4first' ts-node src/jobs/tradeMonitor.job.ts",

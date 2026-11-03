@@ -274,7 +274,7 @@ export function AgentPage() {
             >
               {effDryRun ? '◉ DRY-RUN · SIMULATING' : '○ LIVE · ARMED'}
             </button>
-            <button className="dry-pill" onClick={() => setDeep(!deep)}>{deep ? 'DEEP CREW · 10 ROLES' : 'FAST CREW · 4 ROLES'}</button>
+            <button className="dry-pill" onClick={() => setDeep(!deep)}>{deep ? 'DEEP CREW · 10 ROLES' : 'FAST CREW · 5 ROLES'}</button>
             {wantsQuant(prompt) && (
               <span className="mono" style={{ fontSize: 11, color: 'var(--info)' }}>◈ quant evidence will pin to this run</span>
             )}

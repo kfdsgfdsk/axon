@@ -7,10 +7,12 @@ import { fmtAddr, fmtDateTime, fmtNum, symbolOf } from '../../lib/format';
 import { Badge, Button, Card, Copyable, Empty, Field, Skeleton, statusTone } from '../../ui/primitives';
 import { IconRefresh, IconScan, IconSearch } from '../../ui/icons';
 import { AssetLogo, CHAIN_META, CHAIN_ORDER, ChainLogo, TokenLogo } from '../../ui/chains';
+import type { ChainId } from '../../ui/chains';
+import { useMode } from '../../lib/mode';
 import type { Deposit } from '../../lib/types';
 import './deposits.css';
 
-type Net = (typeof CHAIN_ORDER)[number];
+type Net = ChainId;
 
 /** Mirror of POST /api/v1/wallets/deposit-address response. */
 interface IssuedAddress {
@@ -32,6 +34,7 @@ const zeroTimers: Record<Net, number> = {
   polygon: 0,
   bsc: 0,
   avalanche: 0,
+  'solana-devnet': 0,
 };
 
 function fmtCountdown(ms: number): string {
@@ -80,6 +83,9 @@ function ChainTimerLabel({ net, rec, now, generating }: { net: Net; rec: IssuedA
 
 export function DepositsPage() {
   const { push } = useToast();
+  const { mode } = useMode();
+  // Devnet is the only testnet, and only demo surfaces it (real valueless SOL).
+  const order: Net[] = mode === 'demo' ? [...CHAIN_ORDER, 'solana-devnet'] : [...CHAIN_ORDER];
   const [sel, setSel] = React.useState<Net>('ethereum');
   // 'native' or a tokenId on the selected chain. The address + timer stay
   // per-network: one on-chain address receives the native coin and every
@@ -132,7 +138,7 @@ export function DepositsPage() {
         if (!alive || !Array.isArray(list)) return;
         const rec: Partial<Record<Net, IssuedAddress>> = {};
         for (const row of list) {
-          if ((CHAIN_ORDER as readonly string[]).includes(row?.networkId) && row?.address) {
+          if (row?.networkId && row.networkId in CHAIN_META && row?.address) {
             rec[row.networkId as Net] = row;
           }
         }
@@ -221,9 +227,9 @@ export function DepositsPage() {
   return (
     <div className="grid-12">
       <div className="span-5 stack" style={{ gap: 14 }}>
-        <Card title="Deposit" sub={`${CHAIN_ORDER.length} NETWORKS · NATIVE + TOKENS`}>
+        <Card title="Deposit" sub={`${order.length} NETWORKS · NATIVE + TOKENS`}>
           <div className="chain-list" role="listbox" aria-label="Deposit networks">
-            {CHAIN_ORDER.map((n) => {
+            {order.map((n) => {
               const m = CHAIN_META[n];
               const rec = issued[n];
               const t = timerOf(rec, now);

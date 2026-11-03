@@ -59,6 +59,7 @@ import { executeTool } from '../../../src/modules/agent/tools';
 import { runCrew } from '../../../src/modules/agent/crew/crew.orchestrator';
 import prisma from '../../../src/lib/prisma';
 import { writeTranscriptLine } from '../../../src/utils/agentTranscript.logger';
+import { PLAYBOOK_VERSION } from '../../../src/modules/agent/crew/playbook';
 import type {
   AgentPrincipal,
   PolicyDecision,
@@ -221,7 +222,7 @@ describe('transcript correlation', () => {
     expect(scoutTurns.map((r) => r.entry.phase)).toEqual(['initial', 'tool-loop']);
     expect(scoutTurns.map((r) => r.entry.attempt)).toEqual([0, 1]);
     for (const turn of roleTurns) {
-      expect(turn.entry.systemPromptVersion).toBe('crew-playbook-v6');
+      expect(turn.entry.systemPromptVersion).toBe(PLAYBOOK_VERSION);
       expect(turn.entry.systemPromptHash).toMatch(/^[0-9a-f]{16}$/);
       expect(typeof turn.entry.latencyMs).toBe('number');
       expect(turn.entry.userContent).toBeTruthy();

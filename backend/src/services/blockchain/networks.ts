@@ -60,11 +60,12 @@ export const NETWORKS: Record<string, NetworkConfig> = {
     addressFamily: 'evm',
     coinType: 60,
     pathTemplate: "m/44'/60'/0'/0/{index}",
-    // Sepolia finality is fast; 6 confirmations is comfortable for testing
+    // Retired: solana-devnet is the only supported testnet. The entry stays
+    // so historical rows resolve to "inactive" instead of "unknown".
     requiredConfirmations: 6,
     nativeCurrency: 'ETH',
     explorerUrl: 'https://sepolia.etherscan.io',
-    isActive: true,
+    isActive: false,
     decimals: 18,
     chainId: 11155111,
     testnet: true,
@@ -169,6 +170,22 @@ export const NETWORKS: Record<string, NetworkConfig> = {
     explorerUrl: 'https://solscan.io',
     isActive: true,
     decimals: 9,
+  },
+  'solana-devnet': {
+    id: 'solana-devnet',
+    name: 'Solana Devnet',
+    type: 'solana',
+    addressFamily: 'solana',
+    coinType: 501,
+    // Same keys as mainnet (same addresses on both clusters); the hot-wallet
+    // reservation applies here too.
+    pathTemplate: "m/44'/501'/{index}'/0'",
+    requiredConfirmations: 1,
+    nativeCurrency: 'SOL',
+    explorerUrl: 'https://explorer.solana.com/?cluster=devnet',
+    isActive: true,
+    decimals: 9,
+    testnet: true,
   },
   tron: {
     id: 'tron',

@@ -20,8 +20,7 @@ jest.mock('../../src/utils/logger', () => ({
 jest.mock('../../src/config', () => ({
   __esModule: true,
   default: {
-    trading: { simulate: true, maxSlippagePct: 1.5 },
-    rango: { defaultSlippage: 1 },
+    trading: { simulate: true, maxSlippagePct: 1.5, defaultSlippage: 1 },
   },
 }));
 
@@ -54,6 +53,7 @@ jest.mock('../../src/services/trading/routers', () => ({
   __esModule: true,
   bestQuote: jest.fn(),
   buildSwapTx: jest.fn(),
+  isRouteSupported: jest.fn(() => true),
 }));
 
 import { getUsdPrice } from '../../src/services/trading/price.service';

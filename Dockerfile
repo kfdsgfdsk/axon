@@ -1,9 +1,11 @@
-# AXON all-in-one: EVERYTHING in ONE container.
+# AXON all-in-one: EVERYTHING in ONE container, ONE published port.
 # Postgres + Redis + signer + API + worker (+ approval/agent) + nginx serving
 # the React terminal SPA with a same-origin /api proxy — all under supervisord.
+# The API listens on 127.0.0.1:3000 INSIDE the container only; nginx on :80 is
+# the single door (SPA + /api/* + /health + /ready).
 #
 # Build:  docker build -t exchange-allinone:local .
-# Run:    ./docker-start.sh   (or: docker run -d -p 3000:3000 -p 8080:80 -v exchange-data:/data exchange-allinone:local)
+# Run:    ./docker-start.sh   (or: docker run -d -p 8080:80 -v exchange-data:/data exchange-allinone:local)
 #
 # NOT for production: single container, dev secrets, no TLS, localhost-only
 # signer/approval/agent listeners.
@@ -100,7 +102,9 @@ ENV NODE_ENV=development \
     ENABLE_APPROVAL=true \
     ENABLE_AGENT=true
 
-EXPOSE 3000 80
+# Single published port: nginx (SPA + /api proxy). The API's 3000,
+# signer's 3100, approval's 3200 and agent's 3220 stay container-internal.
+EXPOSE 80
 
 VOLUME ["/data"]
 

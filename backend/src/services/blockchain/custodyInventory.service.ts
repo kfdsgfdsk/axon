@@ -28,6 +28,7 @@ import prisma from '../../lib/prisma';
 import config from '../../config';
 import logger from '../../utils/logger';
 import { getActiveNetworks, getNetwork } from './networks';
+import { solanaRpcFor } from './solanaRpc';
 
 /**
  * Exact decimal-string → atomic conversion (S-M10). The old
@@ -435,7 +436,7 @@ async function inventorySolana(
   networkId: string,
   liabilityMap: Map<string, number>
 ): Promise<InventorySlice[]> {
-  const rpc = config.rpc.solana;
+  const rpc = solanaRpcFor(networkId);
   if (!rpc) {
     logger.warn('custody.inventory.solana_no_rpc', { networkId });
     return [];

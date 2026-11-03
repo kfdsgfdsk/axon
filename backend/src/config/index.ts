@@ -251,6 +251,7 @@ const config = {
     avalanche: optionalEnv('AVALANCHE_RPC_URL', ''),
     bitcoinApi: optionalEnv('BITCOIN_API_URL', 'https://mempool.space/api'),
     solana: optionalEnv('SOLANA_RPC_URL', 'https://api.mainnet-beta.solana.com'),
+    solanaDevnet: optionalEnv('SOLANA_DEVNET_RPC_URL', 'https://api.devnet.solana.com'),
     tronFullHost: optionalEnv('TRON_FULL_HOST', 'https://api.trongrid.io'),
     tronApiKey: optionalEnv('TRON_API_KEY', ''),
   },
@@ -361,14 +362,18 @@ const config = {
   },
 
 
-  rango: {
-    /** Test key from Rango docs — replace with private key in production */
-    apiKey: optionalEnv('RANGO_API_KEY', 'c6381a79-2817-4602-83bf-6a641a409e32'),
-    baseUrl: optionalEnv('RANGO_BASE_URL', 'https://public-api.rango.exchange'),
-    defaultSlippage: parseFloat(optionalEnv('RANGO_DEFAULT_SLIPPAGE', '1.5')),
-    /** Affiliate fee % (max 3) */
-    referrerFee: optionalEnv('RANGO_REFERRER_FEE', '0.1'),
-    referrerAddress: process.env.RANGO_REFERRER_ADDRESS || '',
+  lifi: {
+    /** Optional key for higher rate limits (free signup); quotes work keyless */
+    apiKey: process.env.LIFI_API_KEY || '',
+    baseUrl: optionalEnv('LIFI_BASE_URL', 'https://li.quest'),
+  },
+  symbiosis: {
+    /** Keyless cross-chain API (Tron legs) */
+    baseUrl: optionalEnv('SYMBIOSIS_BASE_URL', 'https://api.symbiosis.finance'),
+  },
+  relay: {
+    /** Keyless cross-chain API (BTC legs, SOL-origin, Tron↔SOL) */
+    baseUrl: optionalEnv('RELAY_BASE_URL', 'https://api.relay.link'),
   },
 
   trading: {
@@ -429,13 +434,16 @@ const config = {
     estimatedGasCostUsdByNetwork: (() => {
       const defaults: Record<string, number> = {
         ethereum: 12,
-        sepolia: 0.05, // testnet — negligible real cost
+        'solana-devnet': 0.01, // testnet — valueless
         arbitrum: 0.4,
         optimism: 0.4,
         base: 0.4,
         polygon: 0.25,
         bsc: 0.4,
         avalanche: 0.5,
+        solana: 0.05,
+        tron: 2,
+        bitcoin: 3,
       };
       const raw = process.env.TRADE_GAS_COST_USD_JSON;
       if (raw) {
@@ -496,10 +504,12 @@ const config = {
     coingeckoApiKey: process.env.COINGECKO_API_KEY || '',
     /** Pyth Hermes base URL (e.g. https://hermes.pyth.network) */
     pythHermesUrl: optionalEnv('PYTH_HERMES_URL', 'https://hermes.pyth.network'),
+    /** Default slippage % when the client does not specify one */
+    defaultSlippage: parseFloat(optionalEnv('TRADE_DEFAULT_SLIPPAGE', '1.5')),
     /** Parallel quote timeout per router */
     quoteTimeoutMs: parseInt(optionalEnv('TRADE_QUOTE_TIMEOUT_MS', '4000'), 10),
-    /** Comma order of preferred routers for same-chain (jupiter,zerox,rango) */
-    routerOrder: optionalEnv('TRADE_ROUTER_ORDER', 'jupiter,zerox,rango')
+    /** Comma order of preferred routers (kyber,lifi,jupiter,sunswap) */
+    routerOrder: optionalEnv('TRADE_ROUTER_ORDER', 'kyber,lifi,jupiter,sunswap')
       .split(',')
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
@@ -507,8 +517,6 @@ const config = {
     routerCircuitFailures: parseInt(optionalEnv('TRADE_ROUTER_CIRCUIT_FAILURES', '5'), 10),
     /** Circuit-breaker open duration (ms) */
     routerCircuitOpenMs: parseInt(optionalEnv('TRADE_ROUTER_CIRCUIT_OPEN_MS', '60000'), 10),
-    /** Optional 0x API key */
-    zeroxApiKey: process.env.ZEROX_API_KEY || '',
     /**
      * Extra slippage % for stop-loss / emergency exits (fast fill preference).
      * Applied as max(defaultSlippage, exitSlippagePct) when executing conditional exits.
@@ -1041,14 +1049,5 @@ if (isProdLike && (config.trading.simulate || process.env.TRADING_SIMULATE === '
   process.exit(1);
 }
 
-
-// Rango public test key must not be used in production/staging
-const RANGO_PUBLIC_TEST_KEY = 'c6381a79-2817-4602-83bf-6a641a409e32';
-if (isProdLike && config.rango.apiKey === RANGO_PUBLIC_TEST_KEY) {
-  console.error(
-    'FATAL: RANGO_API_KEY is still the public test key. Set a private Rango API key for production/staging.'
-  );
-  process.exit(1);
-}
 
 export default config;

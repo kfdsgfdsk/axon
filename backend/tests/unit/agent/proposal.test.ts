@@ -135,7 +135,7 @@ describe('agent proposal display text (UI must never show raw JSON)', () => {
     const p = parseModelProposal(holdJson, 'strategy')!;
     const text = renderProposalText(p);
     expect(text).toContain('Proposal: Hold pending complete verified data');
-    expect(text).toContain('1. HOLD: Request vague and marks stale');
+    expect(text).toContain('1. Hold: Request vague and marks stale');
     expect(text).toContain('Risks: Slippage');
     expect(text).toContain('Assumptions: Prices are live');
     expect(() => JSON.parse(text)).toThrow();

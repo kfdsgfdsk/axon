@@ -27,8 +27,10 @@ Marks come from the in-memory price hub (Binance WS / REST refresher / CoinGecko
     },
     servers: [
       {
-        url: `http://localhost:${config.port}`,
-        description: 'Local',
+        // Relative: "try it out" works through the single-port nginx proxy
+        // and against a directly exposed API alike.
+        url: '/',
+        description: 'Same origin',
       },
     ],
     components: {

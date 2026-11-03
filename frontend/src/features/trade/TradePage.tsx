@@ -20,6 +20,7 @@ function SwapPane() {
   const [fromAsset, setFromAsset] = React.useState('ethereum');
   const [toAsset, setToAsset] = React.useState('solana');
   const [amount, setAmount] = React.useState('0.4');
+  const [slippage, setSlippage] = React.useState('1.5');
   const [quote, setQuote] = React.useState<any>(null);
   const [busy, setBusy] = React.useState(false);
 
@@ -41,6 +42,7 @@ function SwapPane() {
       toNetworkId: to.networkId,
       toTokenId: to.tokenId,
       amount,
+      slippagePct: Number(slippage),
     };
     setBusy(true);
     try {
@@ -55,15 +57,15 @@ function SwapPane() {
     if (!from || !to) return;
     setBusy(true);
     try {
-      if (mode === 'demo') {
-        push('ok', `Demo swap simulated: ${amount} ${from.symbol} → ${quote?.expectedOut || '?'} ${to.symbol}`);
-      } else {
-        await api('/api/v1/trade/swap', {
-          method: 'POST', csrf: true, idempotency: idemKey(),
-          body: { fromNetworkId: from.networkId, fromTokenId: from.tokenId, toNetworkId: to.networkId, toTokenId: to.tokenId, amount },
-        });
-        push('ok', 'Swap submitted');
-      }
+      // Same endpoint both rails — the flag settles on mock balances in demo.
+      const order: any = await api('/api/v1/trade/swap', {
+        method: 'POST', csrf: true, idempotency: idemKey(),
+        ...demoQuery(mode === 'demo'),
+        body: { fromNetworkId: from.networkId, fromTokenId: from.tokenId, toNetworkId: to.networkId, toTokenId: to.tokenId, amount, slippagePct: Number(slippage) },
+      });
+      push('ok', mode === 'demo'
+        ? `Demo swap filled: ${amount} ${from.symbol} → ${order?.receivedAmount || '?'} ${to.symbol}`
+        : 'Swap submitted');
       setQuote(null);
     } catch (e: any) { push('err', e?.message || 'Swap failed'); }
     finally { setBusy(false); }
@@ -85,8 +87,22 @@ function SwapPane() {
         <div>
           <Button size="sm" variant="ghost" onClick={flip} disabled={!ready}>⇅ Flip direction</Button>
         </div>
-        <Field label="Amount" hint="Server re-quotes at execution; display price never settles">
+        <Field label="Amount" hint="The final numbers lock in when you press swap.">
           <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" placeholder="0.00" />
+        </Field>
+        <Field label="Safety limit" hint="If the price moves more than this while your swap runs, it stops instead of giving you a bad deal.">
+          <div style={{ display: 'flex', gap: 8 }}>
+            {['0.5', '1', '1.5'].map((s) => (
+              <Button
+                key={s}
+                size="sm"
+                variant={slippage === s ? 'default' : 'ghost'}
+                onClick={() => { setSlippage(s); setQuote(null); }}
+              >
+                {s}%
+              </Button>
+            ))}
+          </div>
         </Field>
         <div style={{ display: 'flex', gap: 8 }}>
           <Button onClick={getQuote} loading={busy && !quote} disabled={!amount || !ready}>{busy && !quote ? 'Pricing…' : 'Price this swap'}</Button>
@@ -100,25 +116,52 @@ function SwapPane() {
       <div className="span-5">
         <Card title="Quote" sub={quote ? 'FRESH' : 'EMPTY'}>
           {!quote || !from || !to ? (
-            <Empty title="No quote yet" hint="Set an amount and request a quote." />
+            <Empty title="No quote yet" hint="Pick two assets, enter an amount, and press “Price this swap”." />
           ) : (
             <div style={{ display: 'grid', gap: 12 }}>
               <div style={{ display: 'grid', gap: 8 }}>
                 <QuoteLeg label="You pay" asset={from} amount={amount} />
-                <QuoteLeg label="You receive ≈" asset={to} amount={String(quote.expectedOut || quote.toAmount || quote.received || '?')} />
+                <QuoteLeg label="You get about" asset={to} amount={String(quote.to?.estimatedAmount || quote.expectedOut || quote.toAmount || quote.received || '?')} />
               </div>
               <dl className="kv">
-                {quote.notionalUsd !== undefined && <><dt>Notional</dt><dd>{fmtUsd(quote.notionalUsd)}</dd></>}
-                {quote.feeUsd !== undefined && <><dt>Fee ≈</dt><dd>{fmtUsd(quote.feeUsd)}</dd></>}
-                {quote.slippage && <><dt>Slippage</dt><dd>{quote.slippage}</dd></>}
-                {quote.price && <><dt>Price</dt><dd>{String(quote.price)}</dd></>}
+                {quote.minReceived !== undefined && (
+                  <><dt>Worst case you get</dt><dd>{String(quote.minReceived)} {to.symbol}</dd></>
+                )}
+                {quote.feeUsd !== undefined ? (
+                  <><dt>Fee</dt><dd>≈ {fmtUsd(Number(quote.feeUsd))}{quote.feeAmount !== undefined ? ` (≈ ${quote.feeAmount} ${from.symbol})` : ''}</dd></>
+                ) : (
+                  <><dt>Fee</dt><dd>Shown before you confirm</dd></>
+                )}
+                {(quote.slippagePct ?? quote.slippage) !== undefined && <><dt>Safety limit</dt><dd>{quote.slippagePct ?? quote.slippage}{typeof quote.slippagePct === 'number' ? '%' : ''}</dd></>}
+                <><dt>Takes about</dt><dd>{formatWait(quote.estimatedTimeInSeconds, from.networkId === to.networkId)}</dd></>
+                <><dt>Route</dt><dd>{prettyNetwork(from.networkId)} → {prettyNetwork(to.networkId)}</dd></>
               </dl>
+              <p className="mono" style={{ fontSize: 11, color: 'var(--ink-faint)', margin: 0 }}>
+                One simple fee covers everything, including network costs (gas) — you never pay gas separately. The route is picked automatically for the best price.
+              </p>
             </div>
           )}
         </Card>
       </div>
     </div>
   );
+}
+
+function prettyNetwork(id: string): string {
+  return id
+    .split('-')
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(' ');
+}
+
+function formatWait(seconds: unknown, sameChain: boolean): string {
+  const s = typeof seconds === 'number' && Number.isFinite(seconds) ? seconds : NaN;
+  if (Number.isNaN(s)) return sameChain ? 'Usually under a minute' : 'Usually a few minutes';
+  if (s <= 0) return 'Seconds';
+  if (s < 45) return 'A few seconds';
+  if (s < 90) return 'About a minute';
+  if (s < 3600) return `About ${Math.round(s / 60)} minutes`;
+  return 'About an hour or more';
 }
 
 function QuoteLeg({ label, asset, amount }: { label: string; asset: SupportedAsset; amount: string }) {
@@ -157,8 +200,12 @@ function BracketPane() {
         takeProfitPct: Number(tp), stopLossPct: Number(sl),
       };
       if (trigger) body.triggerPriceUsd = Number(trigger);
-      if (mode === 'demo') push('ok', `Demo bracket staged: ${amount} ${entry.symbol} TP +${tp}% / SL −${sl}%`);
-      else { await api('/api/v1/trade/bracket', { method: 'POST', csrf: true, body }); push('ok', 'Bracket order placed'); }
+      // Same endpoint both rails — the flag locks mock balances in demo.
+      const placed: any = await api('/api/v1/trade/bracket', { method: 'POST', csrf: true, ...demoQuery(mode === 'demo'), body });
+      const n = Array.isArray(placed) ? placed.length : 1;
+      push('ok', mode === 'demo'
+        ? `Demo bracket armed: ${n} leg${n === 1 ? '' : 's'} on ${amount} ${entry.symbol} (TP +${tp}% / SL −${sl}%)`
+        : 'Bracket order placed');
     } catch (e: any) { push('err', e?.message || 'Bracket failed'); }
     finally { setBusy(false); }
   };
@@ -211,20 +258,19 @@ function PositionsPane() {
     if (!entry) return;
     setBusy(true);
     try {
-      if (mode === 'demo') push('ok', `Demo ${side} opened: $${margin} on ${entry.symbol} at ${lev}x`);
-      else {
-        await api('/api/v1/trade/positions', { method: 'POST', csrf: true, idempotency: true, body: { side, assetNetworkId: entry.networkId, assetTokenId: entry.tokenId, marginStable: margin, leverage: Number(lev) } });
-        push('ok', 'Position opened');
-        list.reload();
-      }
+      // Same endpoint both rails — the flag margins mock stables in demo.
+      await api('/api/v1/trade/positions', { method: 'POST', csrf: true, idempotency: true, ...demoQuery(mode === 'demo'), body: { side, assetNetworkId: entry.networkId, assetTokenId: entry.tokenId, marginStable: margin, leverage: Number(lev) } });
+      push('ok', mode === 'demo' ? `Demo ${side} opened: $${margin} on ${entry.symbol} at ${lev}x` : 'Position opened');
+      list.reload();
     } catch (e: any) { push('err', e?.message || 'Open failed'); }
     finally { setBusy(false); }
   };
 
   const close = async (id: string) => {
     try {
-      if (mode === 'demo') push('ok', `Demo position ${id} closed at mark`);
-      else { await api(`/api/v1/trade/positions/${id}/close`, { method: 'POST', csrf: true }); push('ok', 'Position closed'); list.reload(); }
+      await api(`/api/v1/trade/positions/${id}/close`, { method: 'POST', csrf: true, ...demoQuery(mode === 'demo') });
+      push('ok', mode === 'demo' ? `Demo position ${id} closed at mark` : 'Position closed');
+      list.reload();
     } catch (e: any) { push('err', e?.message || 'Close failed'); }
   };
 
@@ -296,8 +342,10 @@ function OrdersPane() {
 
   const cancel = async (id: string) => {
     try {
-      if (mode === 'demo') push('ok', `Demo order ${id} cancelled`);
-      else { await api(`/api/v1/trade/orders/${id}/cancel`, { method: 'POST', csrf: true }); push('ok', 'Order cancelled'); list.reload(); }
+      // Same endpoint both rails — the flag unlocks mock balances in demo.
+      await api(`/api/v1/trade/orders/${id}/cancel`, { method: 'POST', csrf: true, ...demoQuery(mode === 'demo') });
+      push('ok', mode === 'demo' ? `Demo order ${id} cancelled` : 'Order cancelled');
+      list.reload();
     } catch (e: any) { push('err', e?.message || 'Cancel failed'); }
   };
 
@@ -347,16 +395,17 @@ export function TradePage() {
   const [emg, setEmg] = React.useState<any>(null);
 
   React.useEffect(() => {
-    if (mode !== 'live') return;
-    api('/api/v1/trade/emergency').then(setEmg).catch(() => {});
+    // Same endpoint both rails — the flag reads the mock shield in demo.
+    api('/api/v1/trade/emergency', demoQuery(mode === 'demo')).then(setEmg).catch(() => {});
   }, [mode]);
 
   const toggleEmg = async (enabled: boolean) => {
     try {
-      if (mode === 'demo') { push('info', enabled ? 'Demo: crash shield armed (simulated)' : 'Demo: crash shield off'); return; }
-      await api('/api/v1/trade/emergency', { method: 'POST', csrf: true, body: { enabled, dropPct: 15 } });
-      push('ok', enabled ? 'Emergency shield armed' : 'Emergency shield off');
-      setEmg(await api('/api/v1/trade/emergency'));
+      await api('/api/v1/trade/emergency', { method: 'POST', csrf: true, ...demoQuery(mode === 'demo'), body: { enabled, dropPct: 15 } });
+      push('ok', mode === 'demo'
+        ? (enabled ? 'Demo crash shield armed' : 'Demo crash shield off')
+        : (enabled ? 'Emergency shield armed' : 'Emergency shield off'));
+      setEmg(await api('/api/v1/trade/emergency', demoQuery(mode === 'demo')));
     } catch (e: any) { push('err', e?.message || 'Failed'); }
   };
 

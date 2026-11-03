@@ -15,6 +15,7 @@
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { extractJsonObject, safeJsonParse, sanitizeUntrusted } from './safety';
+import { describeAsset, humanizeText } from './humanize';
 import type { MuseCapability, Proposal, ProposalAction } from './types';
 
 const amountSchema = z
@@ -53,7 +54,8 @@ const modelProposalSchema = z.object({
 const DANGEROUS = /withdraw|private\s*key|mnemonic|seed\s*phrase|signer\s*secret/i;
 
 function redactDangerous(value: string): string {
-  return value.replace(/withdraw/gi, 'outbound transfer (blocked by agent policy)');
+  // Word-boundary: "withdrawal" redacts as one word, never "...policy)al".
+  return value.replace(/withdraw\w*/gi, 'outbound transfer (blocked by agent policy)');
 }
 
 /** Sanitize a proposal in place (copy) so it never carries outbound/key intent. */
@@ -171,33 +173,57 @@ export function parseModelProposal(
   return enforceProposalSafety(proposal, maxActions);
 }
 
+const ACTION_VERBS: Record<ProposalAction['type'], string> = {
+  MARKET_SWAP: 'Swap',
+  TAKE_PROFIT: 'Take profit',
+  STOP_LOSS: 'Stop-loss',
+  CANCEL_ORDER: 'Cancel order',
+  HOLD: 'Hold',
+  REBALANCE: 'Rebalance',
+};
+
+function fmtAmount(raw: string): string {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return raw;
+  return n.toLocaleString('en-US', { maximumFractionDigits: 6 });
+}
+
 /**
  * Plain-text rendering of a parsed proposal for SSE/UI display. Structured
  * roles (strategist/judge) must emit schema-valid JSON, but the UI must
- * show straight text — never the raw blob. The raw JSON stays in the
- * transcript/audit trail; this is display-only.
+ * show straight text — never the raw blob, never registry ids or enum
+ * names. The raw JSON stays in the transcript/audit trail; this is
+ * display-only.
  */
 export function renderProposalText(p: Proposal): string {
-  const lines = [`Proposal: ${p.summary}`];
+  const lines = [`Proposal: ${humanizeText(p.summary)}`];
   p.actions.forEach((a, i) => {
-    const legs: string[] = [];
-    if (a.fromNetworkId || a.fromTokenId) {
-      legs.push(`from ${a.fromTokenId || a.fromNetworkId || '?'}`);
+    const verb = ACTION_VERBS[a.type] || a.type;
+    let head = verb;
+    if (a.type === 'CANCEL_ORDER') {
+      const orderId = String(a.meta?.orderId || '').trim();
+      head = orderId ? `Cancel order ${orderId}` : 'Cancel order';
+    } else if (a.fromNetworkId || a.fromTokenId || a.toNetworkId || a.toTokenId) {
+      const from = describeAsset(
+        a.fromTokenId ?? null,
+        a.fromNetworkId || undefined
+      );
+      const to = describeAsset(a.toTokenId ?? null, a.toNetworkId || undefined);
+      const amount =
+        a.amount != null && a.amount !== '' ? `${fmtAmount(String(a.amount))} ` : '';
+      head = a.type === 'HOLD' ? verb : `${verb} ${amount}${from} → ${to}`;
     }
-    if (a.toNetworkId || a.toTokenId) {
-      legs.push(`to ${a.toTokenId || a.toNetworkId || '?'}`);
-    }
-    if (a.amount != null && a.amount !== '') legs.push(`amount ${a.amount}`);
     const notion =
       typeof a.estimatedNotionalUsd === 'number'
         ? ` (~$${a.estimatedNotionalUsd.toLocaleString('en-US', { maximumFractionDigits: 0 })})`
         : '';
-    const detail = legs.length > 0 ? ` [${legs.join(' · ')}]` : '';
-    lines.push(`${i + 1}. ${a.type}${detail}${notion}: ${a.rationale}`);
+    lines.push(`${i + 1}. ${head}${notion}: ${humanizeText(a.rationale)}`);
   });
-  if (p.risks.length > 0) lines.push(`Risks: ${p.risks.join('; ')}`);
-  if (p.assumptions.length > 0) lines.push(`Assumptions: ${p.assumptions.join('; ')}`);
-  if (p.critique) lines.push(`Critique: ${p.critique}`);
+  if (p.risks.length > 0) lines.push(`Risks: ${p.risks.map((r) => humanizeText(r)).join('; ')}`);
+  if (p.assumptions.length > 0) {
+    lines.push(`Assumptions: ${p.assumptions.map((r) => humanizeText(r)).join('; ')}`);
+  }
+  if (p.critique) lines.push(`Critique: ${humanizeText(p.critique)}`);
   return lines.join('\n');
 }
 
@@ -260,5 +286,5 @@ export function roleDisplaySummary(content: string, proposal: Proposal): string 
   const rendered = renderProposalText(proposal);
   if (!prose) return rendered;
   const head = prose.length > 1500 ? `${prose.slice(0, 1500)}…` : prose;
-  return `${head}\n\n${rendered}`;
+  return `${humanizeText(head)}\n\n${rendered}`;
 }

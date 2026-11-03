@@ -112,10 +112,11 @@ describe('crew demo pipeline (deterministic provider)', () => {
     expect(result.crewTurns.map((t) => t.role)).toEqual([
       'scout',
       'strategist',
+      'simulator',
       'judge',
       'explainer',
     ]);
-    expect(result.toolResults?.map((t) => t.name)).toEqual(['balances', 'prices']);
+    expect(result.toolResults?.map((t) => t.name)).toEqual(['balances', 'prices', 'simulate']);
     expect(events).toContain('tool_start');
     expect(events).toContain('verification');
     expect(result.proposal?.actions[0].type).toBe('MARKET_SWAP');

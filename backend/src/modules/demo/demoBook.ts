@@ -14,10 +14,12 @@
  * Served anywhere the `demo` flag is honored: balance/order/position/
  * transaction reads (?demo=true) and agent runs ({ demo: true }), where
  * it feeds the tools, the prompt portfolio summary, and verification.
- * Writes NEVER honor the flag.
+ * Trade writes (swap / bracket / cancel / positions / emergency) honor the
+ * flag too, mutating a per-user in-memory overlay (demoStore.ts) seeded
+ * from this book — same economics, mock balances, never the real ledger.
  */
 
-import { getActiveNetworks } from '../../services/blockchain/networks';
+import { getActiveNetworks, getNetwork } from '../../services/blockchain/networks';
 import { getActiveTokens } from '../../services/blockchain/tokenRegistry.service';
 import { getPriceBatch } from '../../services/trading/price.service';
 
@@ -36,7 +38,6 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-const MAX_STABLES = 6;
 const MAX_TOKENS = 10;
 
 function decimalsForUnits(u: number): number {
@@ -176,7 +177,19 @@ export function buildDemoBook(input: {
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const rng = mulberry32(hashSeed(`demo-book|v1|${userId}`));
-  const stables = seededTake(tokens.filter((t) => t.isStable), MAX_STABLES, rng);
+  // One stable per chain (seeded pick within the chain): every chain with
+  // catalog stables carries a same-chain stable leg, so dry-run rotations
+  // always have a same-chain candidate to simulate. Still deterministic
+  // per user and still catalog-driven (no hardcoded ids).
+  const stablesByNet = new Map<string, typeof tokens>();
+  for (const t of tokens.filter((t) => t.isStable)) {
+    const list = stablesByNet.get(t.networkId) || [];
+    list.push(t);
+    stablesByNet.set(t.networkId, list);
+  }
+  const stables = [...stablesByNet.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .flatMap(([, list]) => seededTake(list, 1, rng));
   const alts = seededTake(tokens.filter((t) => !t.isStable), MAX_TOKENS, rng);
 
   /* ---------- balances ---------- */
@@ -325,7 +338,49 @@ export function buildDemoBook(input: {
   });
   ledger.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
 
-  const history: DemoHistoryItem[] = [
+  const history = buildDemoHistory(ledger, orders, positions);
+
+  return { userId, balances, orders, positions, ledger, history, asOf: now.toISOString() };
+}
+
+/**
+ * Map a real ledger balance row onto the demo balance shape. Used to merge
+ * live solana-devnet stages (deposit → credit → withdraw) into demo reads —
+ * everything else in demo stays mocked.
+ */
+export function toDemoBalanceRow(row: {
+  networkId: string;
+  tokenId: string | null;
+  symbol?: string | null;
+  available: string;
+  locked: string;
+  updatedAt: Date | null;
+}): DemoBalanceRow {
+  let asset = row.symbol || null;
+  if (!asset) {
+    try {
+      asset = getNetwork(row.networkId).nativeCurrency || null;
+    } catch {
+      asset = null;
+    }
+  }
+  return {
+    networkId: row.networkId,
+    tokenId: row.tokenId,
+    asset: asset || 'native',
+    available: row.available,
+    locked: row.locked,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/** Unified-history view over ledger + order + position parts (newest first). */
+export function buildDemoHistory(
+  ledger: DemoLedgerRow[],
+  orders: DemoOrderRow[],
+  positions: DemoPositionRow[],
+): DemoHistoryItem[] {
+  return [
     ...ledger.slice(0, 6).map((l) => ({
       id: l.id,
       type: l.kind === 'trade_settle' ? 'trade' : 'deposit',
@@ -354,8 +409,6 @@ export function buildDemoBook(input: {
       createdAt: p.createdAt,
     })),
   ].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? -1 : 1));
-
-  return { userId, balances, orders, positions, ledger, history, asOf: now.toISOString() };
 }
 
 /** True only for an explicit `demo=true` flag (query or body). */
@@ -366,8 +419,12 @@ export function isDemoFlag(value: unknown): boolean {
 /**
  * Loads the live catalog + live marks, then builds this user's seeded book.
  * Unpriced assets are skipped; stables always ride $1.
+ *
+ * This is the FRESH seed. Readers that must reflect demo writes use
+ * getDemoBook (fresh seed + in-memory overlay); writers seed via
+ * getOrSeedDemoState, which only builds the seed when no state exists.
  */
-export async function getDemoBook(userId: string): Promise<DemoBook> {
+export async function buildFreshDemoBook(userId: string): Promise<DemoBook> {
   const networks = getActiveNetworks()
     .filter((n) => !n.testnet)
     .map((n) => ({ id: n.id, testnet: n.testnet }));
@@ -387,4 +444,59 @@ export async function getDemoBook(userId: string): Promise<DemoBook> {
     return m && m.price > 0 ? m.price : null;
   };
   return buildDemoBook({ userId, networks, tokens, priceOf, now: new Date() });
+}
+
+/**
+ * Demo read view: the fresh seed overlaid with this user's in-memory demo
+ * writes (if any), plus live solana-devnet ledger rows. All `?demo=true`
+ * readers go through here so balances, orders, positions, and history stay
+ * consistent after demo writes — and devnet deposit → credit → withdrawal
+ * stages (which run for real, with valueless SOL) stay visible in demo.
+ */
+export async function getDemoBook(userId: string): Promise<DemoBook> {
+  const fresh = await buildFreshDemoBook(userId);
+  // Deferred require: demoStore imports buildDemoHistory above, so a static
+  // import would close a module cycle; both edges are function-body-only.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const store = require('./demoStore') as {
+    getDemoState: (u: string) => import('./demoStore').DemoState | undefined;
+    applyDemoStateToBook: (
+      b: DemoBook,
+      s: import('./demoStore').DemoState,
+    ) => DemoBook;
+  };
+  const state = store.getDemoState(userId);
+  const view = state ? store.applyDemoStateToBook(fresh, state) : fresh;
+  // Merge real devnet stages (best-effort; demo stays mocked on failure).
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getUserBalances } = require('../balances/balance.service') as {
+      getUserBalances: (u: string) => Promise<
+        Array<{
+          networkId: string;
+          tokenId: string | null;
+          available: string;
+          locked: string;
+          updatedAt: Date | null;
+        }>
+      >;
+    };
+    const real = await getUserBalances(userId);
+    const devnet = real.filter((r) => r.networkId === 'solana-devnet');
+    if (devnet.length > 0) {
+      const toks = await getActiveTokens();
+      const sym = new Map(toks.map((t) => [t.id, t.symbol]));
+      for (const r of devnet) {
+        view.balances.push(
+          toDemoBalanceRow({
+            ...r,
+            symbol: r.tokenId ? sym.get(r.tokenId) || null : null,
+          })
+        );
+      }
+    }
+  } catch {
+    /* ledger unavailable — demo stays fully mocked */
+  }
+  return view;
 }

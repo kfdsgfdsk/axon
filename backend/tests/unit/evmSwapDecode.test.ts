@@ -12,7 +12,6 @@ import {
 import { PreSendError } from '../../src/utils/errors';
 
 const ONE_INCH_V5 = '0x1111111254eeb25477b68fb85ed929f73a960582';
-const ZEROX = '0xdef1c0ded9bec7f1a16708139371f370adeff000';
 
 function padAddr(a: string): string {
   return a.replace(/^0x/i, '').toLowerCase().padStart(64, '0');

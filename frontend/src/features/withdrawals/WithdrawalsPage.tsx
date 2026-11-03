@@ -7,7 +7,7 @@ import { fmtAddr, fmtDateTime, fmtNum, symbolOf } from '../../lib/format';
 import { Badge, Button, Card, Empty, Field, Skeleton, statusTone } from '../../ui/primitives';
 import type { Withdrawal } from '../../lib/types';
 
-const NETWORKS = ['ethereum', 'solana', 'bitcoin', 'tron'];
+const NETWORKS = ['ethereum', 'solana', 'bitcoin', 'tron', 'solana-devnet'];
 
 const STEP_ORDER = ['PENDING', 'APPROVED', 'PROCESSING', 'BROADCAST', 'CONFIRMED'];
 function StepDots({ status }: { status: string }) {
@@ -43,7 +43,8 @@ export function WithdrawalsPage() {
   const [busy, setBusy] = React.useState(false);
   const [confirm, setConfirm] = React.useState(false);
 
-  const tokenId = tok === 'native' ? null : `usdt-${net}`;
+  // Devnet is native-SOL only (no devnet tokens seeded).
+  const tokenId = tok === 'native' || net === 'solana-devnet' ? null : `usdt-${net}`;
   const bal = (balances || []).find((b) => b.networkId === net && (b.tokenId || '') === (tokenId || ''));
   const sym = symbolOf(net, tokenId);
 
@@ -53,11 +54,13 @@ export function WithdrawalsPage() {
     try {
       const body: any = { networkId: net, tokenId, toAddress: to.trim(), amount };
       if (code) body.twoFactorCode = code;
-      if (mode === 'demo') {
+      // Devnet runs for real in both modes (valueless SOL); everything else
+      // is simulated in demo.
+      if (mode === 'demo' && net !== 'solana-devnet') {
         push('ok', `Demo withdrawal queued: ${amount} ${sym} → ${fmtAddr(to.trim())} (simulated dual-control)`);
       } else {
         await api('/api/v1/withdrawals', { method: 'POST', csrf: true, idempotency: idemKey(), body });
-        push('ok', 'Withdrawal requested — pending approval');
+        push('ok', mode === 'demo' ? 'Devnet withdrawal requested — pending approval' : 'Withdrawal requested — pending approval');
         list.reload();
       }
       setTo(''); setAmount(''); setCode(''); setConfirm(false);
@@ -67,7 +70,8 @@ export function WithdrawalsPage() {
 
   const cancel = async (id: string) => {
     try {
-      if (mode === 'demo') push('ok', `Demo withdrawal ${id} cancelled`);
+      const row = (list.data || []).find((w) => w.id === id);
+      if (mode === 'demo' && row?.networkId !== 'solana-devnet') push('ok', `Demo withdrawal ${id} cancelled`);
       else { await api(`/api/v1/withdrawals/${id}/cancel`, { method: 'POST', csrf: true }); push('ok', 'Withdrawal cancelled'); list.reload(); }
     } catch (e: any) { push('err', e?.message || 'Cancel failed'); }
   };

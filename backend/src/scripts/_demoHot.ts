@@ -1,7 +1,7 @@
 import { requestHotWalletAddress } from '../services/signer/client';
 
 async function main() {
-  const r = await requestHotWalletAddress('sepolia');
+  const r = await requestHotWalletAddress('solana-devnet');
   console.log(JSON.stringify(r));
 }
 

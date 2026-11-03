@@ -54,9 +54,6 @@ function words(data: string): string[] {
 
 // ─── Known selectors (4-byte) ──────────────────────────────────────────────
 
-// 0x transformERC20(inputToken, outputToken, inputTokenAmount, minOutputTokenAmount, ...)
-const SEL_0X_TRANSFORM = '0x415565b0';
-// 0x sellToLiquidityProvider / similar — treat as opaque if we can't fully decode
 // 1inch v5 swap(executor, desc, data) — desc has srcToken, dstToken, srcReceiver, dstReceiver, amount, minReturnAmount
 const SEL_1INCH_V5_SWAP = '0x12aa3caf';
 // 1inch v5 unoswap
@@ -70,55 +67,6 @@ const SEL_PARASWAP_SIMPLE = '0x54e3f31b'; // simpleSwap
 const SEL_PARASWAP_MULTI = '0xa94e78ef'; // multiSwap (approx; may vary by version)
 // Generic ERC-20 transfer (should not appear as top-level router call for swaps)
 const SEL_ERC20_TRANSFER = '0xa9059cbb';
-
-/**
- * Decode 0x Exchange Proxy transformERC20-style calldata.
- * Layout (simplified, matches common 0x v3/v4 transform):
- *   inputToken, outputToken, inputTokenAmount, minOutputTokenAmount, ...
- * Recipient is often the taker (msg.sender) — for allowance-holder the
- * recipient may be encoded later; we require OrderBounds.receiveAddress
- * to match either an explicit recipient word or we accept when the order
- * receiveAddress is the hot-wallet observation address (caller must pass
- * the authoritative receiveAddress from TradeOrder).
- *
- * When recipient cannot be extracted safely → return null (reject).
- */
-function decode0xTransform(data: string): DecodedSwapCall | null {
-  const w = words(data);
-  if (w.length < 4) return null;
-  const sellToken = addr(w[0]);
-  const _buyToken = addr(w[1]);
-  const sellAmountAtomic = u256(w[2]);
-  const minOut = u256(w[3]);
-  // 0x often pays to msg.sender; many custody designs use receiveAddress = user
-  // observation address. Without a reliable recipient word we cannot prove
-  // destination — fail closed unless a later word looks like an address that
-  // matches common patterns. Prefer reject over guess.
-  // Some 0x payloads include recipient at a later offset; scan for a non-zero
-  // address after the first 4 words that is not a token.
-  let recipient = '';
-  for (let i = 4; i < Math.min(w.length, 12); i++) {
-    const a = addr(w[i]);
-    if (a !== ZERO && a !== sellToken && a !== _buyToken && /^0x[0-9a-f]{40}$/.test(a)) {
-      // Heuristic only — still require OrderBounds match at check time
-      recipient = a;
-      break;
-    }
-  }
-  if (!recipient) {
-    // Allowance-holder flows often imply recipient = tx.from (hot wallet).
-    // Caller supplies expected receiveAddress; we set a sentinel so the
-    // bounds check can decide. Use empty → bounds check will fail unless
-    // order.receiveAddress is explicitly allowed as "self".
-    recipient = '';
-  }
-  return {
-    sellToken: sellToken === ZERO ? NATIVE : sellToken,
-    sellAmountAtomic,
-    recipient,
-    minOut,
-  };
-}
 
 /**
  * 1inch Aggregation Router v5 swap(
@@ -199,10 +147,6 @@ function register(router: string, selector: string, decoder: Decoder) {
   ROUTER_DECODERS[r].set(selector.toLowerCase(), decoder);
 }
 
-// 0x Exchange Proxy
-register('0xdef1c0ded9bec7f1a16708139371f370adeff000', SEL_0X_TRANSFORM, decode0xTransform);
-// 0x Allowance Holder
-register('0x0000000000001ff3684f28c67538d4d072c22734', SEL_0X_TRANSFORM, decode0xTransform);
 // 1inch v5
 register('0x1111111254eeb25477b68fb85ed929f73a960582', SEL_1INCH_V5_SWAP, decode1inchV5Swap);
 register('0x1111111254eeb25477b68fb85ed929f73a960582', SEL_1INCH_V5_UNOSWAP, decode1inchUnoswap);
@@ -215,7 +159,8 @@ register('0xdef171fe48cf0115b1d80b47dcab5e65e5a07d07', SEL_PARASWAP_SIMPLE, deco
 register('0xdef171fe48cf0115b1d80b47dcab5e65e5a07d07', SEL_PARASWAP_MULTI, decodeParaswapSimple);
 register('0x6a000f20005980200259b80c5102003040001068', SEL_PARASWAP_SIMPLE, decodeParaswapSimple);
 // Uniswap Universal Router — intentionally NOT registered → unknown selector → reject
-// Rango Diamond — intentionally NOT registered → reject until full decode exists
+// LI.FI Diamond / Kyber router — opaque diamond calldata, verified via
+// assertProviderSwapMeta instead of selector decode (see below).
 
 /**
  * Decode top-level call. Returns null on unknown selector / opaque data.
@@ -327,12 +272,96 @@ export function verifyEvmSwapCalldata(
   return decoded;
 }
 
+/**
+ * Backend quote bindings the signer matches against authoritative order
+ * bounds. Attached to the built tx by the trading backend (see SwapMeta in
+ * routers.ts) for providers whose calldata is an opaque diamond call the
+ * signer cannot decode (LI.FI, Kyber, SunSwap).
+ */
+export interface ProviderSwapMeta {
+  fromToken: string;
+  fromAmountAtomic: string;
+  toAddress: string;
+  toAmountMinAtomic?: string;
+}
+
+/**
+ * Verify provider meta against authoritative order bounds.
+ * The router allowlist + native value cap constrain the provider response;
+ * this binds the backend's parsed quote to the order so a wrong-order /
+ * wrong-receiver / under-floor tx fails here. Throws PreSendError.
+ */
+export function assertProviderSwapMeta(
+  meta: unknown,
+  bounds: OrderBounds
+): void {
+  const m = meta as Partial<ProviderSwapMeta> | null;
+  if (!m || typeof m !== 'object') {
+    throw new PreSendError('SWAP_META: missing provider meta (fail closed)', 400);
+  }
+  // Compare case-insensitively for 0x (checksummed), exactly otherwise
+  // (base58 mints/addresses are case-sensitive).
+  const norm = (s: string): string =>
+    s.startsWith('0x') || s.startsWith('0X') ? s.toLowerCase() : s;
+  const sell = String(m.fromToken || '');
+  const expectedSell = bounds.fromTokenAddress;
+  const sellOk =
+    (sell && norm(sell) === norm(expectedSell)) ||
+    (norm(sell) === ZERO && norm(expectedSell) === NATIVE);
+  if (!sellOk) {
+    throw new PreSendError(
+      `SWAP_META: sellToken ${sell} != order ${expectedSell}`,
+      400
+    );
+  }
+
+  let amt: bigint;
+  try {
+    amt = BigInt(String(m.fromAmountAtomic));
+  } catch {
+    throw new PreSendError('SWAP_META: malformed sell amount', 400);
+  }
+  if (amt <= 0n) {
+    throw new PreSendError('SWAP_META: non-positive sell amount', 400);
+  }
+  if (amt > bounds.fromAmountAtomic) {
+    throw new PreSendError(
+      `SWAP_META: sellAmount ${amt} > order ${bounds.fromAmountAtomic}`,
+      400
+    );
+  }
+
+  const recv = String(m.toAddress || '');
+  if (!recv) {
+    throw new PreSendError('SWAP_META: missing receiver (fail closed)', 400);
+  }
+  if (norm(recv) !== norm(bounds.receiveAddress)) {
+    throw new PreSendError(
+      `SWAP_META: receiver ${recv} != order.receiveAddress ${bounds.receiveAddress}`,
+      400
+    );
+  }
+
+  if (m.toAmountMinAtomic != null) {
+    let floor: bigint;
+    try {
+      floor = BigInt(String(m.toAmountMinAtomic));
+    } catch {
+      throw new PreSendError('SWAP_META: malformed floor', 400);
+    }
+    if (floor < bounds.minReceiveAtomic) {
+      throw new PreSendError(
+        `SWAP_META: minOut ${floor} < order floor ${bounds.minReceiveAtomic}`,
+        400
+      );
+    }
+  }
+}
+
 /** Exported for unit tests */
 export const __test = {
-  decode0xTransform,
   decode1inchV5Swap,
   decode1inchUnoswapTo,
   ROUTER_DECODERS,
-  SEL_0X_TRANSFORM,
   SEL_1INCH_V5_SWAP,
 };

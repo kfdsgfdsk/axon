@@ -2,10 +2,12 @@
  * On-chain observation of swap destination amounts.
  *
  * Settlement MUST trust only chain data:
- *  - EVM ERC-20: sum Transfer logs to the hot wallet for the token contract
- *  - EVM native: balance delta of the hot wallet across the inclusion block
- *  - Solana SPL: pre/post token-balance delta for hot owner + mint
- *  - Solana native: pre/post lamport delta for the hot account
+ *  - EVM ERC-20: sum Transfer logs to the receive address for the token contract
+ *  - EVM native: balance delta of the receive address across the inclusion block
+ *  - Solana SPL: pre/post token-balance delta for receive owner + mint
+ *  - Solana native: pre/post lamport delta for the receive account
+ *  - Tron TRC-20: sum Transfer logs to the receive address for the token contract
+ *  - Tron TRX: sum internal transfers to the receive address in the receipt
  *
  * Quote mid / amountOutMin are NEVER used as credit amounts. amountOutMin may
  * only be used as an optional soft warning when actual < min.
@@ -13,8 +15,10 @@
 
 import { ethers } from 'ethers';
 import { Connection, PublicKey } from '@solana/web3.js';
+import { TronWeb } from '../blockchain/tronweb';
 import config from '../../config';
 import { getNetwork } from '../blockchain/networks';
+import { solanaRpcFor } from '../blockchain/solanaRpc';
 import { getEvmProvider } from '../blockchain/evmProvider';
 import { getHotWalletAddress } from '../blockchain/withdrawalBroadcaster.service';
 import logger from '../../utils/logger';
@@ -65,6 +69,8 @@ export async function observeOnChainReceived(
       atomic = await observeEvmReceived(opts);
     } else if (network.type === 'solana') {
       atomic = await observeSolanaReceived(opts);
+    } else if (network.type === 'tron') {
+      atomic = await observeTronReceived(opts);
     } else {
       logger.warn('On-chain receive observation not implemented for network type', {
         networkId: opts.networkId,
@@ -223,10 +229,115 @@ async function nativeBalanceDelta(
   }
 }
 
+/**
+ * Normalize Tron hex (log addresses/topics): lowercase, no 0x prefix.
+ * Tron log addresses are 21-byte (41…) hex; topic words are 32-byte with the
+ * address right-aligned (last 42 chars).
+ */
+function tronWordAddress(word: string): string {
+  const clean = word.toLowerCase().replace(/^0x/, '');
+  return clean.slice(-42);
+}
+
+async function observeTronReceived(opts: ObserveOnChainInput): Promise<bigint | null> {
+  const host = (config.rpc.tronFullHost || '').trim();
+  if (!host) {
+    logger.warn('TRON_FULL_HOST not set for on-chain observation');
+    return null;
+  }
+  const tronWeb: any = new TronWeb({
+    fullHost: host,
+    headers: config.rpc.tronApiKey
+      ? { 'TRON-PRO-API-KEY': config.rpc.tronApiKey }
+      : undefined,
+  });
+  const recipientB58 = (
+    (opts.recipientAddress || '').trim() ||
+    (await getHotWalletAddress(opts.networkId))
+  ).trim();
+  if (!tronWeb.isAddress(recipientB58)) {
+    logger.warn('Invalid Tron recipient for on-chain observation', {
+      recipient: recipientB58,
+    });
+    return null;
+  }
+  const recipientHex = String(tronWeb.address.toHex(recipientB58))
+    .toLowerCase()
+    .replace(/^0x/, '');
+
+  const info = await tronWeb.trx.getTransactionInfoById(opts.txHash);
+  if (!info || !info.id) {
+    logger.warn('Tron transaction info not found for on-chain observation', {
+      networkId: opts.networkId,
+      txHash: opts.txHash,
+    });
+    return null;
+  }
+  const result = info.receipt?.result || info.ret?.[0]?.contractRet;
+  if (result !== 'SUCCESS') {
+    logger.warn('Tron receipt is not SUCCESS — no credit', {
+      networkId: opts.networkId,
+      txHash: opts.txHash,
+      result,
+    });
+    return null;
+  }
+
+  const contract = (opts.contract || '').trim();
+  if (contract) {
+    if (!tronWeb.isAddress(contract)) {
+      logger.warn('Invalid TRC-20 contract for on-chain observation', { contract });
+      return null;
+    }
+    const tokenHex = String(tronWeb.address.toHex(contract))
+      .toLowerCase()
+      .replace(/^0x/, '');
+    let total = 0n;
+    for (const log of info.log || []) {
+      const addr = String(log.address || '')
+        .toLowerCase()
+        .replace(/^0x/, '');
+      if (addr !== tokenHex) continue;
+      const topics: string[] = log.topics || [];
+      if (topics.length < 3) continue;
+      const sig = String(topics[0]).toLowerCase().replace(/^0x/, '');
+      if (sig !== ERC20_TRANSFER_TOPIC.replace(/^0x/, '')) continue;
+      if (tronWordAddress(String(topics[2])) !== recipientHex) continue;
+      try {
+        const value = BigInt('0x' + String(log.data || '').replace(/^0x/, ''));
+        if (value > 0n) total += value;
+      } catch {
+        /* malformed log data — skip */
+      }
+    }
+    return total;
+  }
+
+  // Native TRX: sum internal transfers to the recipient in this receipt.
+  let total = 0n;
+  for (const it of info.internal_transactions || []) {
+    const to = String(
+      it.transferTo_address || it.to_address || ''
+    ).toLowerCase().replace(/^0x/, '');
+    if (to !== recipientHex) continue;
+    for (const c of it.callValueInfo || []) {
+      try {
+        const v = BigInt(c.callValue || 0);
+        if (v > 0n) total += v;
+      } catch {
+        /* skip */
+      }
+    }
+  }
+  return total;
+}
+
 async function observeSolanaReceived(opts: ObserveOnChainInput): Promise<bigint | null> {
-  const rpc = (config.rpc.solana || '').trim();
+  const rpc = solanaRpcFor(opts.networkId).trim();
   if (!rpc) {
-    logger.warn('No SOLANA_RPC_URL configured for on-chain observation');
+    logger.warn('No Solana RPC URL configured for on-chain observation', {
+      networkId: opts.networkId,
+    });
     return null;
   }
   const connection = new Connection(rpc, 'confirmed');

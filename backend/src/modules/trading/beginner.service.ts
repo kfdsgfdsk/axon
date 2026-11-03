@@ -3,7 +3,7 @@
  *
  * Flow:
  *  1. User pays a small platform fee from their own stable balance
- *  2. BUY only at 1×: margin is swapped stable → asset via market routers (Rango / Jupiter / 0x)
+ *  2. BUY only at 1×: margin is swapped stable → asset via market routers (LI.FI / Kyber / Jupiter / SunSwap)
  *  3. Received asset is locked on the user's ledger until exit
  *  4. Optional TP / SL / expiry trigger a reverse swap asset → stable
  *  5. On exit, user receives real swap proceeds; platform takes fee + optional % of profit
@@ -97,7 +97,8 @@ export interface OpenPositionInput {
   expiresInHours?: number;
 }
 
-async function resolveStable(
+/** Resolve the settlement stable leg (shared by live opens and demo opens). */
+export async function resolveStable(
   networkId: string,
   tokenId?: string | null
 ): Promise<{ networkId: string; tokenId: string }> {

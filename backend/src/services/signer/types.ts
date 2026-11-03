@@ -49,17 +49,21 @@ export interface ColdSweepResult {
 }
 
 /**
- * Pre-built swap transaction from Jupiter / 0x / Rango.
+ * Pre-built swap transaction from Jupiter / LI.FI / Kyber / SunSwap / Symbiosis / Relay.
  * Signer only signs + broadcasts — never rebuilds routes.
  *
- * EVM (0x / Rango): tx = { to, data, value?, gas?, gasPrice?, maxFeePerGas?, … }
+ * EVM (LI.FI / Kyber / Symbiosis): tx = { to, data, value?, gas?, …, meta? }
+ * EVM (Relay): tx = { to, data, value?, …, depositAddress, meta? } (plain deposit)
  * Solana (Jupiter): tx = base64 VersionedTransaction string
- * Rango may wrap as { txType, transaction, … } — broadcast unwraps common shapes.
+ * Solana (Relay): tx = { kind: 'relay-solana', instructions, …, meta? }
+ * Tron (SunSwap): tx = { kind: 'sunswap', args: { … }, meta? }
+ * Tron (Symbiosis): tx = { kind: 'symbiosis-tron', trigger: { … }, meta? }
+ * Tron/Bitcoin (Relay): tx = { kind: 'relay-deposit', depositAddress, stepData, meta? }
  */
 export interface SignSwapBroadcastRequest {
   networkId: string;
   tradeOrderId: string;
-  provider: 'jupiter' | 'zerox' | 'rango';
+  provider: 'jupiter' | 'lifi' | 'kyber' | 'sunswap' | 'symbiosis' | 'relay';
   /** Opaque provider tx payload (BuiltSwapTx.tx) */
   tx: unknown;
   /**

@@ -23,7 +23,7 @@ export function assetKeyOf(networkId: string, tokenId?: string | null): string {
 
 /* ---------- balances ---------- */
 
-/** Query fragment carrying the demo flag (reads only; writes never take it). */
+/** Query fragment carrying the demo flag (reads serve the mock book; trade writes settle on it). */
 export function demoQuery(demo: boolean): { query?: Record<string, string> } {
   return demo ? { query: { demo: 'true' } } : {};
 }
@@ -204,21 +204,24 @@ export function usePortfolio() {
   }, []);
 
   const byAsset = React.useMemo(() => new Map(catalog.map((a) => [a.asset, a])), [catalog]);
+  // Devnet SOL prices at the mainnet SOL mark (same asset, valueless cluster).
+  const entryFor = React.useCallback((key: string, b: { networkId: string; tokenId?: string | null }) =>
+    byAsset.get(key) ?? (!b.tokenId && b.networkId === 'solana-devnet' ? byAsset.get('solana') : undefined),
+  [byAsset]);
   const symKey = React.useMemo(() => {
-    const ids = (balances || []).map((b) => assetKeyOf(b.networkId, b.tokenId || null));
-    const syms = ids
-      .map((k) => byAsset.get(k))
+    const syms = (balances || [])
+      .map((b) => entryFor(assetKeyOf(b.networkId, b.tokenId || null), b))
       .filter((e): e is SupportedAsset => !!e && !e.stable && !!e.binance)
       .map((e) => e.binance as string);
     return [...new Set(syms)].sort().join(',');
-  }, [balances, byAsset]);
+  }, [balances, entryFor]);
   React.useEffect(() => {
     if (symKey) ensureClientSymbols(symKey.split(','));
   }, [symKey]);
 
   const rows = (balances || []).map((b) => {
     const key = assetKeyOf(b.networkId, b.tokenId || null);
-    const entry = byAsset.get(key);
+    const entry = entryFor(key, b);
     const unit = entry?.stable ? 1 : clientMarkOf(entry?.binance)?.price ?? 0;
     const total = Number(b.total) || 0;
     return { ...b, key, unit, value: total * unit };

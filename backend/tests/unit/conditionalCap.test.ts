@@ -49,8 +49,8 @@ jest.mock('../../src/config', () => ({
       estimatedGasCostUsdByNetwork: {},
       estimatedGasCostUsdDefault: 5,
       triggerIndexEnabled: false,
+      defaultSlippage: 1,
     },
-    rango: { defaultSlippage: 1 },
   },
 }));
 

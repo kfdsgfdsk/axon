@@ -11,8 +11,7 @@ import {
 } from '../balances/balance.service';
 import { getNetwork } from '../../services/blockchain/networks';
 import { getToken } from '../../services/blockchain/tokenRegistry.service';
-import { RANGO_CHAIN } from '../../services/trading/rango.client';
-import { bestQuote, buildSwapTx, type RouteQuote } from '../../services/trading/routers';
+import { bestQuote, buildSwapTx, isRouteSupported, type RouteQuote } from '../../services/trading/routers';
 import {
   getUsdPrice,
   getMidWithMeta,
@@ -177,7 +176,7 @@ function clampSlippagePct(requested: number | undefined | null): number {
   const base =
     requested != null && Number.isFinite(requested) && requested > 0
       ? requested
-      : config.rango.defaultSlippage;
+      : config.trading.defaultSlippage;
   return Math.min(base, cap);
 }
 
@@ -229,19 +228,63 @@ export interface QuoteInput {
   slippagePct?: number;
 }
 
+/**
+ * Beginner-friendly guidance for the few pairs with no direct route.
+ * Returns null when the pair should route (or fails for another reason).
+ */
+export function routeHint(
+  fromNetworkId: string,
+  fromTokenId: string | null,
+  toNetworkId: string
+): string | null {
+  if (fromTokenId && fromNetworkId === 'solana' && toNetworkId !== 'solana') {
+    return (
+      'This token can only swap within Solana for now. ' +
+      'Swap it to SOL first, then SOL to your target.'
+    );
+  }
+  if (
+    fromTokenId &&
+    fromNetworkId === 'tron' &&
+    (toNetworkId === 'solana' || toNetworkId === 'bitcoin')
+  ) {
+    return (
+      'This token can only leave Tron toward Ethereum-family networks. ' +
+      'Swap it to a coin on Ethereum or Base first, then to your target.'
+    );
+  }
+  if (fromNetworkId === 'solana' && toNetworkId === 'bitcoin') {
+    return (
+      'Direct SOL → BTC swaps are not available right now. ' +
+      'Swap SOL → ETH first, then ETH → BTC — two quick swaps.'
+    );
+  }
+  return null;
+}
+
 export async function getSwapQuote(input: QuoteInput) {
-  // Cross-chain requires Rango. Same-chain can use 0x (EVM) / Jupiter (Solana)
-  // even when the network is a testnet not listed in RANGO_CHAIN (e.g. sepolia).
+  // Routable: EVM↔EVM, EVM→SOL, Tron↔EVM, BTC legs, SOL-origin, Tron↔SOL,
+  // same-chain EVM/SOL/TRON. Anything else fails closed here (no provider).
   const sameChain = input.fromNetworkId === input.toNetworkId;
   if (!sameChain) {
-    if (!RANGO_CHAIN[input.fromNetworkId] || !RANGO_CHAIN[input.toNetworkId]) {
+    if (!isRouteSupported(input.fromNetworkId, input.toNetworkId)) {
+      const hint = routeHint(
+        input.fromNetworkId,
+        normalizeTokenId(input.fromTokenId),
+        input.toNetworkId
+      );
       throw new ValidationError(
-        'One or both networks are not supported for cross-chain swaps'
+        hint || 'One or both networks are not supported for cross-chain swaps'
       );
     }
   } else {
     // Same-chain: require the network to be active (getNetwork throws if not)
     getNetwork(input.fromNetworkId);
+    if (!isRouteSupported(input.fromNetworkId, input.toNetworkId)) {
+      throw new ValidationError(
+        `Swaps are not supported on ${input.fromNetworkId} (no router)`
+      );
+    }
   }
   const fromTid = normalizeTokenId(input.fromTokenId);
   const toTid = normalizeTokenId(input.toTokenId);
@@ -272,6 +315,7 @@ export async function getSwapQuote(input: QuoteInput) {
     const outHuman = amount.mul(fromUsd).div(toUsd);
     const outAtomic = toAtomic(outHuman, toMeta.decimals);
     const minAtomic = toAtomic(outHuman.mul(1 - slip / 100), toMeta.decimals);
+    const simFee = requiredFeeUsd(input.fromNetworkId, amount.mul(fromUsd));
     return {
       from: {
         networkId: input.fromNetworkId,
@@ -292,22 +336,43 @@ export async function getSwapQuote(input: QuoteInput) {
       raw: null,
       path: undefined,
       amountOutMinAtomic: minAtomic,
+      /** Worst case you receive (human units, same slippage math). */
+      minReceived: outHuman.mul(1 - slip / 100).toString(),
+      /** Protocol fee, USD + from-asset units. Covers network costs (gas). */
+      feeUsd: simFee.toString(),
+      feeAmount: simFee.div(fromUsd).toDecimalPlaces(8).toString(),
     };
   }
 
-  const quote = await bestQuote({
-    fromNetworkId: input.fromNetworkId,
-    toNetworkId: input.toNetworkId,
-    fromContract: fromMeta.contract,
-    toContract: toMeta.contract,
-    fromSymbol: fromMeta.symbol,
-    toSymbol: toMeta.symbol,
-    amountAtomic: atomic,
-    fromDecimals: fromMeta.decimals,
-    toDecimals: toMeta.decimals,
-    slippagePct: slip,
-    userId: input.userId,
-  });
+  let quote: RouteQuote;
+  try {
+    quote = await bestQuote({
+      fromNetworkId: input.fromNetworkId,
+      toNetworkId: input.toNetworkId,
+      fromContract: fromMeta.contract,
+      toContract: toMeta.contract,
+      fromSymbol: fromMeta.symbol,
+      toSymbol: toMeta.symbol,
+      amountAtomic: atomic,
+      fromDecimals: fromMeta.decimals,
+      toDecimals: toMeta.decimals,
+      slippagePct: slip,
+      userId: input.userId,
+    });
+  } catch (err: any) {
+    // Known gaps get actionable guidance instead of a bare NO_ROUTE.
+    // Otherwise (routable pair, providers declined): the size exceeds
+    // available liquidity within the slippage tolerance, or the tolerance
+    // is below provider minimums — normal DEX behavior, retry guidance.
+    if (typeof err?.message === 'string' && err.message.startsWith('NO_ROUTE')) {
+      const hint =
+        routeHint(input.fromNetworkId, fromTid || null, input.toNetworkId) ||
+        `No route at this size and slippage — try a smaller amount or higher ` +
+          `slippage (max ${config.trading.maxSlippagePct || 1.5}%).`;
+      throw new ValidationError(`${err.message}. ${hint}`);
+    }
+    throw err;
+  }
 
   const outHuman = fromAtomic(quote.amountOutAtomic, toMeta.decimals);
 
@@ -319,6 +384,27 @@ export async function getSwapQuote(input: QuoteInput) {
     BigInt(quote.amountOutMinAtomic) > 0n
       ? quote.amountOutMinAtomic
       : undefined;
+
+  // Display-only fee: same math execution enforces (fail-closed there).
+  // Omitted when the mark is missing so quotes stay useful during warmup.
+  let feeUsd: string | undefined;
+  let feeAmount: string | undefined;
+  try {
+    const entryMeta = await getMidWithMeta({
+      networkId: input.fromNetworkId,
+      tokenId: fromTid || undefined,
+    });
+    if (entryMeta && !entryMeta.stale && entryMeta.price > 0) {
+      const fee = requiredFeeUsd(
+        input.fromNetworkId,
+        amount.mul(entryMeta.price)
+      );
+      feeUsd = fee.toString();
+      feeAmount = fee.div(entryMeta.price).toDecimalPlaces(8).toString();
+    }
+  } catch {
+    /* display-only; execution re-evaluates fail-closed */
+  }
 
   return {
     from: {
@@ -341,8 +427,21 @@ export async function getSwapQuote(input: QuoteInput) {
     // the full provider payload on the public quote API (see controller strip).
     raw: quote.raw,
     path: undefined,
+    /**
+     * Exact per-quote route costs from the pricing provider (gas estimate,
+     * bridge/solver cut, market impact). Informational: output is net of
+     * output-side cuts; gas is paid by the hot wallet and covered by feeUsd.
+     */
+    routeCosts: quote.costs,
     /** Route slippage floor (atomic). Required for same-chain auto-settle. */
     amountOutMinAtomic,
+    /** Worst case you receive (human units). */
+    minReceived: amountOutMinAtomic
+      ? fromAtomic(amountOutMinAtomic, toMeta.decimals).toString()
+      : undefined,
+    /** Protocol fee, USD + from-asset units. Covers network costs (gas). */
+    feeUsd,
+    feeAmount,
   };
 }
 
@@ -375,7 +474,9 @@ export interface MarketSwapInput {
  *  - buildSwapTx outside lock, then executeSwapForOrder (sign/broadcast/settle)
  *  - COMPLETED only after on-chain confirmation (or TRADING_SIMULATE ledger settle)
  *
- * Same-chain Solana → Jupiter preferred; same-chain EVM → 0x when keyed; cross-chain → Rango.
+ * Same-chain Solana → Jupiter; same-chain EVM → Kyber/LI.FI best-quote;
+ * same-chain Tron → SunSwap; cross-chain → LI.FI (EVM↔EVM, EVM→SOL) /
+ * Symbiosis (Tron↔EVM).
  * Quote path uses parallel bestQuote (TRADE_QUOTE_TIMEOUT_MS); no sequential fallbacks.
  *
  * Set TRADING_SIMULATE=true to credit synthetic fill from quote (dev only).
@@ -427,7 +528,7 @@ export async function createMarketSwap(input: MarketSwapInput, opts: { bypassPau
   // (The gte check above guarantees spendAmount > 0 in this mode.)
   const spendAmount = platformSourced ? amount.minus(feeAmount) : amount;
 
-  // Parallel multi-provider quote (Jupiter / 0x / Rango as eligible)
+  // Parallel multi-provider quote (Kyber / LI.FI / Jupiter / SunSwap as eligible)
   const slip = clampSlippagePct(input.slippagePct);
 
   const quote = await getSwapQuote({
@@ -440,7 +541,7 @@ export async function createMarketSwap(input: MarketSwapInput, opts: { bypassPau
     slippagePct: slip,
   });
 
-  const provider = (quote.provider as string) || 'rango';
+  const provider = (quote.provider as string) || 'lifi';
 
   // Unique per-order destination address so on-chain observation is isolated
   // from shared hot-wallet activity (sweeps / other swaps / withdrawals).
@@ -501,7 +602,7 @@ export async function createMarketSwap(input: MarketSwapInput, opts: { bypassPau
     const toAddress = order.receiveAddress || (await getHotWalletAddress(input.toNetworkId));
     const fromMeta = await resolveContract(input.fromNetworkId, fromTid);
     const toMeta = await resolveContract(input.toNetworkId, toTid);
-    const slip = input.slippagePct ?? config.rango.defaultSlippage;
+    const slip = input.slippagePct ?? config.trading.defaultSlippage;
     const atomic = toAtomic(spendAmount, fromMeta.decimals);
 
     // Reconstruct RouteQuote shape from getSwapQuote response for buildSwapTx.
@@ -1046,7 +1147,7 @@ export async function executeSwapForOrder(
     const baseSlip =
       order.slippageBps != null
         ? order.slippageBps / 100
-        : config.rango.defaultSlippage;
+        : config.trading.defaultSlippage;
     const slip = opts?.preferFastExit
       ? Math.max(clampSlippagePct(baseSlip), config.trading.exitSlippagePct)
       : clampSlippagePct(baseSlip);
@@ -1054,7 +1155,7 @@ export async function executeSwapForOrder(
     // 2. Reuse stored swapTx if present; otherwise quote + build
     let swapTx: unknown = null;
     let provider: RouteQuote['provider'] =
-      (order.routeProvider as RouteQuote['provider']) || 'rango';
+      (order.routeProvider as RouteQuote['provider']) || 'lifi';
     let amountOutAtomic: string | undefined;
     let requestId: string | undefined;
 
@@ -1563,7 +1664,7 @@ export async function createConditionalOrder(input: {
               ? new Prisma.Decimal(input.takeProfitPct)
               : null,
           triggerPriceUsd: triggerTp,
-          slippageBps: Math.round(config.rango.defaultSlippage * 100),
+          slippageBps: Math.round(config.trading.defaultSlippage * 100),
           // Provider chosen at trigger time via bestQuote (multi-provider)
           routeProvider: null,
           expiresAt,
@@ -1593,7 +1694,7 @@ export async function createConditionalOrder(input: {
                 ? new Prisma.Decimal(input.stopLossPct)
                 : null,
             triggerPriceUsd: triggerSl,
-            slippageBps: Math.round(config.rango.defaultSlippage * 100),
+            slippageBps: Math.round(config.trading.defaultSlippage * 100),
             routeProvider: null,
             expiresAt,
             nextCheckAt: null,
@@ -2412,7 +2513,7 @@ async function checkEmergencyProtections() {
                 toNetworkId: b.networkId,
                 toTokenId: stableId,
                 amount: b.available.toString(),
-                slippagePct: Math.max(config.rango.defaultSlippage, 2),
+                slippagePct: Math.max(config.trading.defaultSlippage, 2),
               },
               // Emergency exits are protective: must run even while paused (circuit breaker).
               { bypassPause: true }

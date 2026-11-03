@@ -72,6 +72,22 @@ const ROLE_MAX_TOKENS: Record<AgentRoleId, number> = {
   explainer: 700,
 };
 
+/**
+ * Output-token budget for one role call.
+ *
+ * Reasoning tokens count toward the output budget — live-measured on
+ * muse-spark-1.3: even WITHOUT a reasoning_effort param the model burns
+ * ~1200-3100 reasoning tokens on a simple prompt (nondeterministic), and a
+ * realistic red-team prompt burns ~2000 before writing a word. A budget the
+ * reasoning alone can exhaust returns finish=length with ZERO content (the
+ * degraded-role epidemic: all fast-tier roles down at 1512). There is no cool
+ * mode, so every role gets full headroom. Headroom is a cap, not spend: the
+ * model still stops at `stop`.
+ */
+export function outputTokenBudget(role: AgentRoleId, _reasoningEffort?: string): number {
+  return (ROLE_MAX_TOKENS[role] ?? 900) + 6000;
+}
+
 const TOOL_ROLES: ReadonlySet<AgentRoleId> = new Set(['scout', 'simulator']);
 
 /** Roles that earn the deep-reasoning model + full reasoning effort on deep runs. */
@@ -325,7 +341,7 @@ function demoProposal(
 ): Proposal {
   const risky = demoIntent(text).wantsRisky;
   const actions = role === 'strategist' || role === 'judge' ? demoAction(text) : [
-    { type: 'HOLD' as const, rationale: `${role} is analysis-only; no executable action.` },
+    { type: 'HOLD' as const, rationale: 'This step only gathers facts; it does not trade.' },
   ];
   return {
     id: randomUUID(),
@@ -540,7 +556,11 @@ function parseToolCalls(raw: unknown): ToolCall[] {
       function?: { name?: string; arguments?: string };
     };
     const name = tc.function?.name;
-    if (!name || !ALLOWED_TOOL_NAMES.has(name)) continue;
+    if (!name) continue;
+    // Unknown names are KEPT (not dropped): the crew refuses them in-loop
+    // ("Tool X is not available") so the model can self-correct. Dropping
+    // them here used to masquerade as "empty model response" (finish
+    // tool_calls, zero parsed calls) and burn retries + the breaker.
     let params: Record<string, unknown> = {};
     try {
       const parsed = tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
@@ -549,6 +569,11 @@ function parseToolCalls(raw: unknown): ToolCall[] {
       }
     } catch {
       params = {};
+    }
+    if (!ALLOWED_TOOL_NAMES.has(name)) {
+      logger.warn('muse.client unknown tool requested; crew will refuse in-loop', {
+        tool: name.slice(0, 64),
+      });
     }
     out.push({ id: tc.id || randomUUID(), name: name as ToolName, params });
   }
@@ -582,17 +607,11 @@ function buildBody(
     ...input.messages,
   ];
 
-  // Reasoning tokens count toward the output budget: add headroom at deep effort.
-  const hotReasoning =
-    input.reasoningEffort === 'high' ||
-    input.reasoningEffort === 'xhigh' ||
-    input.reasoningEffort === 'max';
-
   const body: Record<string, unknown> = {
     model: pickModel(input.role, d, input.deep),
     messages: toOpenAiMessages(messages),
     temperature: JSON_ROLES.has(input.role) ? 0.1 : input.role.startsWith('red_') ? 0.4 : 0.2,
-    max_tokens: (ROLE_MAX_TOKENS[input.role] ?? 900) + (hotReasoning ? 2048 : 0),
+    max_tokens: outputTokenBudget(input.role, input.reasoningEffort),
   };
 
   if (input.reasoningEffort && !strip.reasoning) {
@@ -692,6 +711,18 @@ function shouldRetry(err: unknown): boolean {
   return status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
+/**
+ * Sticky structured-output downgrade: once the provider 400s a json_schema
+ * request, subsequent calls in this process start at json_object instead of
+ * burning a failed round-trip per structured role per run.
+ */
+let stickyJsonLevel: JsonLevel | null = null;
+
+/** Test-only reset for the sticky JSON level. */
+export function resetStickyJsonLevel(): void {
+  stickyJsonLevel = null;
+}
+
 async function completeLive(
   input: RoleCompletionInput,
   d: ReturnType<typeof museDefaults>
@@ -707,7 +738,8 @@ async function completeLive(
 
   const maxAttempts = 3;
   let lastErr: unknown;
-  let jsonLevel: JsonLevel = d.jsonMode ? 2 : 0;
+  let jsonLevel: JsonLevel =
+    stickyJsonLevel ?? (d.jsonMode ? 2 : 0);
   const strip: BodyStripOptions = {};
   const effective = input.timeoutMs
     ? { ...d, timeoutMs: Math.max(1000, Math.min(d.timeoutMs, input.timeoutMs)) }
@@ -755,9 +787,11 @@ async function completeLive(
       if (status === 400) {
         if (jsonLevel === 2) {
           jsonLevel = 1;
+          stickyJsonLevel = 1;
           stripped = 'response_format(json_schema→json_object)';
         } else if (jsonLevel === 1) {
           jsonLevel = 0;
+          stickyJsonLevel = 0;
           stripped = 'response_format';
         } else if (input.reasoningEffort && !strip.reasoning) {
           strip.reasoning = true;

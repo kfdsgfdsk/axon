@@ -1,7 +1,7 @@
 /**
  * Deposit sweeper — consolidate user deposit addresses → hot wallet.
  *
- * Why: trading (Rango/Jupiter/0x) and withdrawals spend from the hot wallet.
+ * Why: trading (LI.FI/Kyber/Jupiter/SunSwap) and withdrawals spend from the hot wallet.
  * Credits already live on the user ledger; on-chain coins must follow so the
  * platform does not need house inventory.
  *
