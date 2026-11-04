@@ -112,8 +112,48 @@ export interface Proposal {
   createdAt: string;
 }
 
+export interface AgentThread {
+  id: string;
+  title: string;
+  summary: string | null;
+  runCount: number;
+  lastActionId: string | null;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export interface ExecutionReceipt {
+  executionId: string;
+  status: 'PENDING' | 'SUBMITTED' | 'FILLED' | 'FAILED' | 'REJECTED';
+  orderId: string | null;
+  proposalId: string;
+  actionType: string;
+  policyKind: string;
+  confirmationId: string;
+  idempotentReplay: boolean;
+  narration: string;
+  simulated: boolean;
+  createdAt: string;
+}
+
+export interface AgentMemory {
+  riskTolerance: 'conservative' | 'moderate' | 'aggressive';
+  preferredAssets: string[];
+  preferredNetworks: string[];
+  notes: string | null;
+  updatedAt: string | null;
+  recentDecisions: Array<{
+    actionId: string;
+    at: string;
+    goal: string;
+    policyKind: string | null;
+    actions: string[];
+  }>;
+}
+
 export type CrewEvent =
   | { type: 'start'; [k: string]: unknown }
+  | { type: 'thread'; threadId: string; followUp: boolean; parentActionId?: string | null }
   | { type: 'verification'; [k: string]: unknown }
   | { type: 'repair'; [k: string]: unknown }
   | { type: 'role_start'; role: string; label?: string }
@@ -125,15 +165,6 @@ export type CrewEvent =
   | { type: 'message'; text: string }
   | { type: 'done'; result?: unknown }
   | { type: 'error'; message: string };
-
-export interface AgentKey {
-  id: string;
-  name: string;
-  scopes: string[];
-  createdAt: string;
-  lastUsedAt?: string | null;
-  prefix?: string;
-}
 
 export interface RunUsage {
   promptTokens: number;

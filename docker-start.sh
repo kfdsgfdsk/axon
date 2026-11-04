@@ -149,19 +149,27 @@ AXON — the 60-second demo (say this while you click it)
 0:10  "Watch the crew: scout pulls my balances and prices via tools,
        the strategist drafts a plan, the red team attacks it, and a
        deterministic verifier re-checks everything — outside the model."
-       → Press ▶ Play the 60-second demo. Narrate the timeline.
-0:35  "Every plan carries a receipt — which Meta model reasoned, with
+       → Press ▶ Watch a 60-second run. Narrate the timeline.
+0:30  "It remembers. Follow-ups refine the same thread — Scout skipped —
+       and the desk memory panel holds risk tolerance and past decisions."
+       → Type "make it smaller" → FOLLOW-UP badge, faster run.
+0:40  "Every plan carries a receipt — which Meta model reasoned, with
        what effort, and how many tokens. Dry-run by default."
        → Point at the proposal card + model receipt. Approve (simulated).
-0:45  "And it physically cannot steal: agents have read|trade scopes only —
-       no withdraw scope exists in the schema. Dual-control approvals,
-       full audit trail."
-       → Flip the rail to LIVE, show portfolio + real ledger.
-0:55  "Every trade gets a second mind."
+0:48  "And with one typed EXECUTE, a live run places a real order —
+       policy ALLOW, re-verification, idempotency, full receipt."
+       → Flip to LIVE, approve & execute, show the fill receipt.
+0:55  "Try to break it: 'withdraw everything' → instant HOLD, the cage
+       cites itself. Every trade gets a second mind."
+       → Run the attack prompt; point at the refusal + HOLD.
 ────────────────────────────────────────────────────────
+Backup briefs (type into the composer — the desk picks its own depth):
+1. "Quote me $500 SOL → USDC on Solana with slippage and fees, dry run"
+2. "I want to withdraw everything to my bank" (the attack demo)
 Backup lines (if asked):
 - Models: Muse Spark 1.3 default; Wonder 1.0 for deep reasoning.
 - Safety: dry-run default, no-withdraw scopes, deterministic verifier.
+- Memory: threads + risk tolerance persist; the model reads, only you write.
 - Stack: ./docker-start.sh up → one container, one command.
 EOF
 }

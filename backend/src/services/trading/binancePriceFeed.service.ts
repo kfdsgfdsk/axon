@@ -124,6 +124,8 @@ export interface BinanceWsStats {
   /** REST batch fetches since boot (0 while WS is healthy). */
   restFallbackFetches: number;
   restFallbackSkipped: number;
+  /** Symbols Binance rejected as invalid (quarantined, retried hourly). */
+  quarantinedSymbols: string[];
 }
 
 let wsMsgCount = 0;
@@ -157,6 +159,7 @@ export function getBinanceWsStats(): BinanceWsStats {
     reconnects: wsReconnects,
     restFallbackFetches,
     restFallbackSkipped,
+    quarantinedSymbols: [...invalidSymbols.keys()],
   };
 }
 
@@ -204,40 +207,112 @@ let restTimer: ReturnType<typeof setInterval> | null = null;
 let restRunning = false;
 
 /**
+ * Symbols Binance rejected as invalid (delisted/unknown), mapped to the
+ * timestamp they may be retried. One bad symbol used to 400 the whole REST
+ * batch, pinning every other symbol stale — rejects are quarantined instead
+ * so the rest of the batch keeps flowing.
+ */
+const invalidSymbols = new Map<string, number>();
+const INVALID_SYMBOL_RETRY_MS = 60 * 60 * 1000;
+const BATCH_CHUNK_SIZE = 20;
+
+/** Test-only reset for the invalid-symbol quarantine. */
+export function resetInvalidSymbolsForTest(): void {
+  invalidSymbols.clear();
+}
+
+function isQuarantined(sym: string, now = Date.now()): boolean {
+  const until = invalidSymbols.get(sym);
+  if (until == null) return false;
+  if (now >= until) {
+    invalidSymbols.delete(sym);
+    return false;
+  }
+  return true;
+}
+
+function quarantineSymbol(sym: string, now = Date.now()): void {
+  if (!invalidSymbols.has(sym)) {
+    logger.warn('Binance symbol rejected as invalid — quarantined for 1h', {
+      symbol: sym,
+    });
+  }
+  invalidSymbols.set(sym, now + INVALID_SYMBOL_RETRY_MS);
+}
+
+/** Binance answers unknown symbols with HTTP 400 code -1121 "Invalid symbol." */
+function isInvalidSymbolBody(body: string): boolean {
+  return /-1121|invalid symbol/i.test(body || '');
+}
+
+async function readErrorBody(res: { text?: () => Promise<string> }): Promise<string> {
+  try {
+    if (typeof res.text === 'function') return await res.text();
+  } catch {
+    /* ignore */
+  }
+  return '';
+}
+
+/**
  * Batch ticker: one request for all symbols via Binance's symbols=[...] form.
  * https://binance-docs.github.io/apidocs/spot/en/#symbol-price-ticker
+ *
+ * Resilient: when Binance rejects a batch as invalid-symbol, each symbol is
+ * re-probed alone so valid marks still land and only the rejects are
+ * quarantined. Transient failures (network, 5xx, rate-limit) are never
+ * quarantined — they retry on the next tick.
  */
 async function fetchBinanceTickersBatch(
   symbols: string[]
-): Promise<Map<string, number>> {
-  const out = new Map<string, number>();
-  if (symbols.length === 0) return out;
+): Promise<{ prices: Map<string, number>; invalid: string[] }> {
+  const prices = new Map<string, number>();
+  const invalid: string[] = [];
+  const fresh = symbols.filter((s) => !isQuarantined(s));
+  if (fresh.length === 0) return { prices, invalid };
 
-  try {
-    // Binance accepts symbols as a JSON array query param, e.g. ["BTCUSDT","ETHUSDT"]
-    const param = encodeURIComponent(JSON.stringify(symbols));
-    const url = `https://api.binance.com/api/v3/ticker/price?symbols=${param}`;
-    const res = await fetch(url, {
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(config.trading.priceFetchTimeoutMs),
-    });
-    if (!res.ok) {
-      logger.warn('Binance batch ticker non-OK', { status: res.status });
-      return out;
+  const fetchChunk = async (chunk: string[]): Promise<void> => {
+    try {
+      // Binance accepts symbols as a JSON array query param, e.g. ["BTCUSDT","ETHUSDT"]
+      const param = encodeURIComponent(JSON.stringify(chunk));
+      const url = `https://api.binance.com/api/v3/ticker/price?symbols=${param}`;
+      const res = await fetch(url, {
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(config.trading.priceFetchTimeoutMs),
+      });
+      if (!res.ok) {
+        const body = await readErrorBody(res);
+        if (isInvalidSymbolBody(body)) {
+          if (chunk.length === 1) {
+            invalid.push(chunk[0]);
+            return;
+          }
+          // One bad apple: isolate it with single-symbol probes.
+          for (const sym of chunk) await fetchChunk([sym]);
+          return;
+        }
+        logger.warn('Binance batch ticker non-OK', { status: res.status });
+        return;
+      }
+      const data = (await res.json()) as Array<{ symbol?: string; price?: string }>;
+      if (!Array.isArray(data)) return;
+      for (const row of data) {
+        const sym = row.symbol;
+        const price = parseFloat(row.price || '');
+        if (!sym || !Number.isFinite(price) || price <= 0) continue;
+        prices.set(sym, price);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn('Binance batch ticker failed', { error: msg });
     }
-    const data = (await res.json()) as Array<{ symbol?: string; price?: string }>;
-    if (!Array.isArray(data)) return out;
-    for (const row of data) {
-      const sym = row.symbol;
-      const price = parseFloat(row.price || '');
-      if (!sym || !Number.isFinite(price) || price <= 0) continue;
-      out.set(sym, price);
-    }
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn('Binance batch ticker failed', { error: msg });
+  };
+
+  for (let i = 0; i < fresh.length; i += BATCH_CHUNK_SIZE) {
+    await fetchChunk(fresh.slice(i, i + BATCH_CHUNK_SIZE));
   }
-  return out;
+  for (const sym of invalid) quarantineSymbol(sym);
+  return { prices, invalid };
 }
 
 export async function restTick(): Promise<void> {
@@ -258,9 +333,10 @@ export async function restTick(): Promise<void> {
     restFallbackFetches += 1;
     logger.debug('Binance REST fallback fetching stale symbols', {
       count: need.length,
-      symbols: need,
+      symbols: need.slice(0, 8),
+      ...(need.length > 8 ? { more: need.length - 8 } : {}),
     });
-    const prices = await fetchBinanceTickersBatch(need);
+    const { prices } = await fetchBinanceTickersBatch(need);
     for (const sym of need) {
       const price = prices.get(sym);
       if (price == null) continue;

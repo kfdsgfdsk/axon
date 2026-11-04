@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { api, tokens } from './api';
+import { api, tokens, AUTH_DEAD_EVENT } from './api';
 
 export interface User { id: string; email: string; role?: string }
 
@@ -9,10 +9,11 @@ interface AuthCtx {
   login: (email: string, password: string, code?: string) => Promise<{ need2fa?: boolean; preAuthToken?: string }>;
   verify2fa: (preAuthToken: string, code: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
+  refresh: () => Promise<void>;
   logout: () => void;
 }
 
-const Ctx = createContext<AuthCtx>({ user: null, loading: true, login: async () => ({}), verify2fa: async () => {}, register: async () => {}, logout: () => {} });
+const Ctx = createContext<AuthCtx>({ user: null, loading: true, login: async () => ({}), verify2fa: async () => {}, register: async () => {}, refresh: async () => {}, logout: () => {} });
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -32,6 +33,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       setLoading(false);
     })();
+  }, []);
+
+  // When the refresh token itself is rejected the session is unrecoverable:
+  // sign out locally so the Gate routes to login and every poller unmounts
+  // instead of 401-storming forever from a stale tab.
+  useEffect(() => {
+    const onDead = () => { tokens.clear(); setUser(null); };
+    window.addEventListener(AUTH_DEAD_EVENT, onDead);
+    return () => window.removeEventListener(AUTH_DEAD_EVENT, onDead);
   }, []);
 
   const login = async (email: string, password: string, code?: string) => {
@@ -54,13 +64,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (d?.accessToken) { tokens.set(d.accessToken, d.refreshToken); setUser({ id: d.user?.id || 'me', email }); }
   };
 
+  const refresh = async () => {
+    if (!tokens.access) { setUser(null); return; }
+    try {
+      setUser(await api<User>('/api/v1/users/me'));
+    } catch {
+      tokens.clear();
+      setUser(null);
+    }
+  };
+
   const logout = () => {
     api('/api/v1/auth/logout', { method: 'POST', body: { refreshToken: tokens.refresh } }).catch(() => {});
     tokens.clear();
     setUser(null);
   };
 
-  return <Ctx.Provider value={{ user, loading, login, verify2fa, register, logout }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ user, loading, login, verify2fa, register, refresh, logout }}>{children}</Ctx.Provider>;
 }
 
 export const useAuth = () => useContext(Ctx);

@@ -22,6 +22,7 @@ preferIPv4();
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { trustSingleProxy } from './middleware/proxy';
 import { createRateLimiter } from './middleware/rateLimit.middleware';
 import { errorHandler } from './middleware/errorHandler.middleware';
 import { issueCsrfToken } from './middleware/csrf.middleware';
@@ -35,9 +36,7 @@ import { closeRedis } from './lib/redis';
 const app = express();
 
 // F13: same single-hop proxy trust as the main API (rate-limit keys on req.ip).
-if (config.isProdLike) {
-  app.set('trust proxy', 1);
-}
+trustSingleProxy(app);
 
 app.use(
   helmet({

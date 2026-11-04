@@ -1,14 +1,23 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { demoQuery, txListOf, useModeData, usePortfolio, useTicks } from '../../lib/data';
+import { assetKeyOf, demoQuery, txListOf, useModeData, usePortfolio, useTicks } from '../../lib/data';
 import { CountUp } from '../../ui/countup';
 import { api } from '../../lib/api';
+import { useSupportedAssets } from '../../lib/binanceClient';
 import { fmtAddr, fmtNum, fmtPct, fmtPriceUsd, fmtUsd, symbolOf, timeAgo } from '../../lib/format';
 import { AllocBars } from '../../ui/charts';
+import { MarketLogo } from '../../ui/chains';
 import { Badge, Button, Card, Empty, Stat, statusTone } from '../../ui/primitives';
+import { AskDesk, usePublishDockContext } from '../../ui/AskDesk';
+import type { AskSuggestion } from '../../ui/AskDesk';
 import { IconDeposit, IconPlus, IconWithdraw } from '../../ui/icons';
 import { useMode } from '../../lib/mode';
 import type { Order, Position, TxRow } from '../../lib/types';
+
+/** Catalog id Markets understands — devnet SOL charts as mainnet SOL. */
+function marketAssetOf(key: string): string {
+  return key === 'solana-devnet' ? 'solana' : key;
+}
 
 function BriefCta({ topSym, topValue, equity }: { topSym: string | null; topValue: number; equity: number }) {
   const nav = useNavigate();
@@ -43,6 +52,9 @@ export function OverviewPage() {
   const orders = useModeData<Order[]>('orders', (demo) => api('/api/v1/trade/orders', demoQuery(demo)), 15000);
   const activity = useModeData<TxRow[]>('activity', (demo) => api('/api/v1/transactions', demoQuery(demo)).then(txListOf), 15000);
 
+  const { assets } = useSupportedAssets();
+  const metaByAsset = React.useMemo(() => new Map(assets.map((a) => [a.asset, a])), [assets]);
+
   const openPos = (positions.data || []).filter((p: any) => String(p.status).toUpperCase() === 'OPEN');
   const totalPnl = openPos.reduce((s: number, p: any) => s + (Number(p.pnlUsd ?? p.pnlStable) || 0), 0);
   const eth = ticks.find((t) => t.id === 'ethereum');
@@ -50,6 +62,18 @@ export function OverviewPage() {
   const sol = ticks.find((t) => t.id === 'solana');
   const top = [...rows].sort((a, b) => b.value - a.value)[0] || null;
   const topSym = top ? symbolOf(top.networkId, top.tokenId || null) : null;
+
+  // First chip carries the user's actual book state; the rest stay general.
+  const firstSuggestion: AskSuggestion = top && topSym
+    ? {
+        label: 'Review my book',
+        prompt: `My ${topSym} holding (${fmtUsd(top.value, 0)} of ${fmtUsd(equity, 0)} equity, ${stablePct.toFixed(0)}% in stables) is my largest, with ${openPos.length} open position${openPos.length === 1 ? '' : 's'} at ${fmtUsd(totalPnl)} P&L. Review my book and flag the one change with the best risk-adjusted payoff. Dry run only.`,
+      }
+    : {
+        label: 'Review my book',
+        prompt: `My book is empty (equity ${fmtUsd(equity, 0)}, ${rows.length} lines). What should my first move be? Dry run only.`,
+      };
+  usePublishDockContext(firstSuggestion);
 
   return (
     <div style={{ display: 'grid', gap: 14 }}>
@@ -72,13 +96,18 @@ export function OverviewPage() {
               </div>
               <div style={{ marginLeft: 'auto', display: 'flex', gap: 22 }}>
                 {[btc, eth, sol].map((t) => (
-                  <div key={t?.id}>
+                  <Link
+                    key={t?.id}
+                    to={t ? `/markets?asset=${encodeURIComponent(marketAssetOf(t.id))}` : '/markets'}
+                    title={t ? `Open ${t.sym} chart` : 'Open charts'}
+                    style={{ color: 'inherit', textDecoration: 'none' }}
+                  >
                     <div className="mono" style={{ fontSize: 11, fontWeight: 600 }}>{t?.sym}</div>
                     <div className="mono" style={{ fontSize: 13, fontWeight: 600 }}>
                       {t?.price ? `$${t.price >= 100 ? Number(t.price).toLocaleString('en-US', { maximumFractionDigits: 0 }) : t.price}` : '—'}
                     </div>
                     <div className="mono" style={{ fontSize: 11, color: (t?.chg ?? 0) >= 0 ? '#0d7a43' : '#b3271e' }}>{fmtPct(t?.chg)}</div>
-                  </div>
+                  </Link>
                 ))}
               </div>
             </div>
@@ -113,6 +142,13 @@ export function OverviewPage() {
                 <BriefCta topSym={topSym} topValue={top?.value || 0} equity={equity} />
                 <Link to="/markets"><Button arrow>Check the marks</Button></Link>
               </div>
+              <AskDesk
+                suggestions={[
+                  firstSuggestion,
+                  { label: 'What changed today?', prompt: 'What changed in my portfolio today? Compare against recent activity and flag the movers.' },
+                  { label: 'Flag any risks', prompt: 'Flag any risks in my book right now: concentration, leverage, stale marks, open orders. Dry run only.' },
+                ]}
+              />
               <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-faint)', letterSpacing: '0.06em' }}>
                 SCOUT ✓ · STRATEGIST ✓ · RISK DESK ✓ — 3 ACTIONS PROPOSED
               </div>
@@ -130,16 +166,29 @@ export function OverviewPage() {
                   <tr><th>Asset</th><th>Network</th><th className="r">Available</th><th className="r">Locked</th><th className="r">Price</th><th className="r">Value</th></tr>
                 </thead>
                 <tbody>
-                  {rows.map((r) => (
+                  {rows.map((r) => {
+                    const key = r.key || assetKeyOf(r.networkId, r.tokenId || null);
+                    const sym = symbolOf(r.networkId, r.tokenId || null);
+                    return (
                     <tr key={`${r.networkId}-${r.tokenId}`}>
-                      <td><strong className="mono">{symbolOf(r.networkId, r.tokenId || null)}</strong></td>
+                      <td>
+                        <Link
+                          to={`/markets?asset=${encodeURIComponent(marketAssetOf(key))}`}
+                          title={`Open ${sym} chart`}
+                          style={{ display: 'flex', alignItems: 'center', gap: 9, color: 'inherit', textDecoration: 'none' }}
+                        >
+                          <MarketLogo id={key} sym={sym} size={26} meta={metaByAsset.get(key) ?? null} />
+                          <strong className="mono">{sym}</strong>
+                        </Link>
+                      </td>
                       <td className="mono" style={{ color: 'var(--ink-dim)', fontSize: 12 }}>{r.networkId}</td>
                       <td className="r mono">{fmtNum(r.available)}</td>
                       <td className="r mono" style={{ color: 'var(--ink-faint)' }}>{fmtNum(r.locked)}</td>
                       <td className="r mono">{r.unit ? fmtPriceUsd(r.unit) : '—'}</td>
                       <td className="r mono"><strong>{fmtUsd(r.value, 0)}</strong></td>
                     </tr>
-                  ))}
+                    );
+                  })}
                   {rows.length === 0 && <tr><td colSpan={6}><Empty title="No holdings yet" hint={mode === 'demo' ? 'Reload to retry the seeded book.' : 'Fund an address on the Deposits page.'} /></td></tr>}
                 </tbody>
               </table>
@@ -163,16 +212,24 @@ export function OverviewPage() {
               <Empty title="Flat book" hint="No open leveraged positions." />
             ) : (
               <div style={{ display: 'grid', gap: 10 }}>
-                {openPos.slice(0, 4).map((p: any) => {
+                {openPos.map((p: any) => {
                   const pnl = p.pnlUsd ?? p.pnlStable;
+                  const key = assetKeyOf(p.assetNetworkId, p.assetTokenId);
+                  const sym = metaByAsset.get(key)?.symbol || symbolOf(p.assetNetworkId, p.assetTokenId);
                   return (
-                    <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }}>
+                    <Link
+                      key={p.id}
+                      to={`/markets?asset=${encodeURIComponent(marketAssetOf(key))}`}
+                      title={`Open ${sym} chart`}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: 'inherit', textDecoration: 'none' }}
+                    >
+                      <MarketLogo id={key} sym={sym} size={24} meta={metaByAsset.get(key) ?? null} />
                       <Badge tone={p.side === 'BUY' ? 'up' : 'down'}>{p.side}</Badge>
-                      <span className="mono" style={{ fontSize: 12 }}>{symbolOf(p.assetNetworkId, p.assetTokenId)} · {p.leverage || 1}x</span>
+                      <span className="mono" style={{ fontSize: 12 }}>{sym} · {p.leverage || 1}x</span>
                       <span className={`mono ${Number(pnl) >= 0 ? 'num-up' : 'num-down'}`} style={{ marginLeft: 'auto', fontSize: 12 }}>
                         {Number(pnl) >= 0 ? '+' : ''}{fmtUsd(pnl)}
                       </span>
-                    </div>
+                    </Link>
                   );
                 })}
                 <Link to="/trade"><Button variant="ghost" size="sm" block arrow>Manage {openPos.length} position{openPos.length === 1 ? '' : 's'}</Button></Link>

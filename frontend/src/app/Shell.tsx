@@ -6,8 +6,8 @@ import { useKeys } from '../lib/hooks';
 import { useTicks } from '../lib/data';
 import { fmtPct } from '../lib/format';
 import {
-  IconActivity, IconAgent, IconDeposit, IconKeys, IconLogout,
-  IconMarkets, IconOverview, IconSearch, IconTrade, IconWithdraw,
+  IconActivity, IconAgent, IconDeposit, IconLogout,
+  IconMarkets, IconOverview, IconSearch, IconTrade, IconUser, IconWithdraw,
 } from '../ui/icons';
 import './app.css';
 
@@ -19,7 +19,7 @@ const NAV = [
   { to: '/withdrawals', label: 'Withdrawals', icon: <IconWithdraw /> },
   { to: '/agent', label: 'Agent', icon: <IconAgent /> },
   { to: '/activity', label: 'Activity', icon: <IconActivity /> },
-  { to: '/keys', label: 'Agent keys', icon: <IconKeys /> },
+  { to: '/profile', label: 'Profile', icon: <IconUser /> },
 ];
 
 const TITLES: Record<string, [string, string]> = {
@@ -30,7 +30,7 @@ const TITLES: Record<string, [string, string]> = {
   '/withdrawals': ['Withdrawals', 'controlled outbound flow'],
   '/agent': ['Agent', 'the crew is on shift'],
   '/activity': ['Activity', 'every ledger event'],
-  '/keys': ['Agent keys', 'scoped machine access'],
+  '/profile': ['Profile', 'account & sign-in'],
 };
 
 function Tape() {

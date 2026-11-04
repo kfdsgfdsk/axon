@@ -160,10 +160,8 @@ describe('resolveCrewAssetKey', () => {
   });
 });
 
-const principal = (scopes: AgentPrincipal['scopes'] = ['read', 'trade']): AgentPrincipal => ({
+const principal = (): AgentPrincipal => ({
   userId: 'u-1',
-  agentKeyId: 'ak-1',
-  scopes,
 });
 
 const ctx = (overrides: Partial<ToolContext> = {}): ToolContext => ({

@@ -2,7 +2,7 @@ import React from 'react';
 import type { PricePoint } from '../../lib/types';
 import { downsample } from '../../lib/chartRanges';
 import { fmtPrice } from '../../lib/format';
-import type { ChartCallout } from './quant';
+import { calloutColor, hexToRgbTriplet, type ChartCallout } from './quant';
 
 /* Quant chart: price line + AI annotation layer (regions, levels, badges).
  * Pure SVG, no deps. Badge numbers match the pattern list 1:1. */
@@ -17,8 +17,9 @@ function extent(pts: PricePoint[]) {
   return { lo: lo - pad, hi: hi + pad };
 }
 
-const TINT = (bullish: boolean | null) =>
-  bullish === true ? '61,220,132' : bullish === false ? '255,82,82' : '124,196,255';
+/** Distinct color per annotated portion (region, level, badge share it). */
+const TINT = (c: ChartCallout, index: number) =>
+  hexToRgbTriplet(calloutColor(c, index));
 
 export function QuantChart({ points, callouts, height = 240, id }: {
   points: PricePoint[]; callouts: ChartCallout[]; height?: number; id?: string;
@@ -96,7 +97,7 @@ export function QuantChart({ points, callouts, height = 240, id }: {
           if (!a || !b) return null;
           const x0 = Math.min(x(a.t), x(b.t));
           const x1 = Math.max(x(a.t), x(b.t));
-          const tint = TINT(c.bullish);
+          const tint = TINT(c, n);
           const bx = Math.min(Math.max((x0 + x1) / 2, padL + 12), padL + iw - 12);
           return (
             <g key={c.id} className="qx-reveal">

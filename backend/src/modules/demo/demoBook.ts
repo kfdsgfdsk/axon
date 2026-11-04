@@ -22,6 +22,7 @@
 import { getActiveNetworks, getNetwork } from '../../services/blockchain/networks';
 import { getActiveTokens } from '../../services/blockchain/tokenRegistry.service';
 import { getPriceBatch } from '../../services/trading/price.service';
+import { defaultSettlementFor } from '../../services/trading/settlement';
 
 function hashSeed(s: string): number {
   let h = 2166136261;
@@ -88,6 +89,10 @@ export interface DemoOrderRow {
   entryPriceUsd: string | null;
   takeProfitPct: string | null;
   stopLossPct: string | null;
+  /** Absolute USD trigger (TP row: TP level; SL-only row: SL level). */
+  triggerPriceUsd: string | null;
+  /** Embedded SL level on dual-leg TP rows (live quotePayload.stopLossTriggerUsd). */
+  stopLossTriggerUsd: string | null;
   lockedAmount: string;
   executedAmount: string | null;
   receivedAmount: string | null;
@@ -112,6 +117,12 @@ export interface DemoPositionRow {
   entryPriceUsd: string;
   notionalUsd: string;
   pnlStable: string | null;
+  takeProfitPct: string | null;
+  stopLossPct: string | null;
+  takeProfitUsd: string | null;
+  stopLossUsd: string | null;
+  closeReason: string | null;
+  expiresAt: Date | null;
   openedAt: Date;
   createdAt: Date;
 }
@@ -268,6 +279,10 @@ export function buildDemoBook(input: {
         entryPriceUsd: null,
         takeProfitPct: s.tp !== undefined ? String(s.tp) : null,
         stopLossPct: s.sl !== undefined ? String(s.sl) : null,
+        // Seeded conditionals carry no absolute levels, so the demo trigger
+        // sweep skips them; user-placed demo brackets store live levels.
+        triggerPriceUsd: null,
+        stopLossTriggerUsd: null,
         lockedAmount: s.status === 'OPEN' ? fromAmount : '0',
         executedAmount: done ? fromAmount : null,
         receivedAmount: null,
@@ -286,7 +301,7 @@ export function buildDemoBook(input: {
     return (priced.get(key) ?? 0) > 0 && !tokens.find((t) => t.id === b.tokenId)?.isStable;
   });
   const stableLeg = balances.find((b) => tokens.find((t) => t.id === b.tokenId)?.isStable)
-    ?? { networkId: 'ethereum', tokenId: 'usdc-ethereum' };
+    ?? defaultSettlementFor('ethereum');
   vols.slice(0, 3).forEach((v, i) => {
     const key = v.tokenId ? `token:${v.tokenId}` : `native:${v.networkId}`;
     const mark = priced.get(key) ?? 0;
@@ -314,6 +329,12 @@ export function buildDemoBook(input: {
       entryPriceUsd: entry.toFixed(6),
       notionalUsd: (margin * lev).toFixed(2),
       pnlStable: pnl.toFixed(2),
+      takeProfitPct: null,
+      stopLossPct: null,
+      takeProfitUsd: null,
+      stopLossUsd: null,
+      closeReason: null,
+      expiresAt: null,
       openedAt,
       createdAt: openedAt,
     });

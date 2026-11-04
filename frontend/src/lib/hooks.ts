@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isRefreshDead } from './api';
 
 /** Polling fetch with loading/error/reload. Pass null key to skip. */
 export function useLive<T>(key: string | null, fetcher: () => Promise<T>, ms = 0) {
@@ -23,7 +24,11 @@ export function useLive<T>(key: string | null, fetcher: () => Promise<T>, ms = 0
 
   useEffect(() => {
     if (!key || !ms) return;
-    const t = setInterval(() => setTick((x) => x + 1), ms);
+    // A dead session never recovers by polling — halt instead of 401-storming.
+    const t = setInterval(() => {
+      if (isRefreshDead()) { clearInterval(t); return; }
+      setTick((x) => x + 1);
+    }, ms);
     return () => clearInterval(t);
   }, [key, ms]);
 

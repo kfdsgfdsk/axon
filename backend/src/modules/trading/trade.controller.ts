@@ -51,13 +51,18 @@ import {
   getDemoState,
   getOrSeedDemoState,
   refreshDemoPositionPnl,
+  settleDemoBracketTriggers,
+  settleDemoPositionTriggers,
 } from '../demo/demoStore';
 import { normalizeTokenId } from '../balances/balance.service';
 import {
-  DEFAULT_STABLE_BY_NETWORK,
   getMidWithMeta,
   getPriceBatch,
 } from '../../services/trading/price.service';
+import {
+  DEFAULT_SETTLEMENT_BY_NETWORK,
+  resolveExitLeg,
+} from '../../services/trading/settlement';
 import config from '../../config';
 import { ForbiddenError, RateLimitError } from '../../utils/errors';
 
@@ -67,7 +72,7 @@ function wantsDemo(req: Request): boolean {
   return isDemoFlag(req.query.demo) || isDemoFlag(body.demo);
 }
 
-/** Demo positions view: refresh OPEN unrealized PnL from live marks (best-effort). */
+/** Demo positions view: fire TP/SL/expiry, then refresh OPEN PnL (best-effort). */
 async function demoPositionsView(userId: string, status?: string) {
   const state = getDemoState(userId);
   if (state) {
@@ -82,18 +87,54 @@ async function demoPositionsView(userId: string, status?: string) {
           ...(p.assetTokenId ? { tokenId: p.assetTokenId } : {}),
         }));
         const metas = await getPriceBatch(items);
-        refreshDemoPositionPnl(state, (key) => {
+        const priceOf = (key: string) => {
           const m = metas.get(key);
           return m && m.price > 0 ? m.price : null;
-        });
+        };
+        // The trade monitor never reads demo state, so demo triggers are
+        // evaluated lazily here (mirrors the live beginner monitor).
+        settleDemoPositionTriggers(state, priceOf);
+        refreshDemoPositionPnl(state, priceOf);
       } catch {
-        /* keep stored pnl */
+        /* keep stored rows */
       }
     }
   }
   return (await getDemoBook(userId)).positions.filter(
     (p) => !status || p.status === status
   );
+}
+
+/** Demo orders view: fire bracket legs whose levels the marks crossed. */
+async function demoOrdersView(userId: string) {
+  const state = getDemoState(userId);
+  if (state) {
+    const open = state.orders.filter(
+      (o) =>
+        o.status === 'OPEN' &&
+        (o.type === 'TAKE_PROFIT' || o.type === 'STOP_LOSS') &&
+        (o.triggerPriceUsd || o.stopLossTriggerUsd)
+    );
+    if (open.length > 0) {
+      try {
+        const items = open.map((o) => ({
+          key: o.fromTokenId
+            ? `token:${o.fromTokenId}`
+            : `native:${o.fromNetworkId}`,
+          networkId: o.fromNetworkId,
+          ...(o.fromTokenId ? { tokenId: o.fromTokenId } : {}),
+        }));
+        const metas = await getPriceBatch(items);
+        settleDemoBracketTriggers(state, (key) => {
+          const m = metas.get(key);
+          return m && m.price > 0 ? m.price : null;
+        });
+      } catch {
+        /* keep stored rows */
+      }
+    }
+  }
+  return (await getDemoBook(userId)).orders;
 }
 
 /** In-memory per-user SSE connection counter (process-local). */
@@ -125,6 +166,8 @@ const conditionalSchema = z.object({
   /** Absolute USD trigger (buy-below / sell-above style) */
   triggerPriceUsd: z.number().positive().optional(),
   toTokenId: z.string().optional().nullable(),
+  /** Settlement chain override (default: matrix leg for networkId) */
+  toNetworkId: z.string().min(1).optional().nullable(),
   expiresInHours: z.number().positive().max(24 * 90).optional(),
 });
 
@@ -211,13 +254,13 @@ export async function placeBracket(req: Request, res: Response, next: NextFuncti
     // Demo flag: same entry mark + economics, locked on mock balances.
     if (wantsDemo(req)) {
       const fromTid = normalizeTokenId(parsed.data.tokenId);
-      const toTid =
-        normalizeTokenId(parsed.data.toTokenId) ||
-        DEFAULT_STABLE_BY_NETWORK[parsed.data.networkId] ||
-        '';
-      if (!toTid) {
-        throw new ValidationError('No default stable for this network; pass toTokenId');
-      }
+      // Same settlement resolution as live (matrix default incl. cross-chain
+      // BTC/TRON legs, same stable + route validation).
+      const leg = await resolveExitLeg(
+        parsed.data.networkId,
+        parsed.data.toNetworkId,
+        parsed.data.toTokenId
+      );
       const meta = await getMidWithMeta({
         networkId: parsed.data.networkId,
         tokenId: fromTid || undefined,
@@ -236,7 +279,8 @@ export async function placeBracket(req: Request, res: Response, next: NextFuncti
         takeProfitPct: parsed.data.takeProfitPct,
         stopLossPct: parsed.data.stopLossPct,
         triggerPriceUsd: parsed.data.triggerPriceUsd,
-        toTokenId: toTid,
+        toNetworkId: leg.networkId,
+        toTokenId: leg.tokenId,
         entryPrice: meta.price,
       });
       res.status(201).json({ success: true, data: orders });
@@ -254,7 +298,7 @@ export async function list(req: Request, res: Response, next: NextFunction) {
     if (!req.user) throw new UnauthorizedError();
     // Demo flag: this user's seeded orders instead of the real order book.
     const data = isDemoFlag(req.query.demo)
-      ? (await getDemoBook(req.user.id)).orders
+      ? await demoOrdersView(req.user.id)
       : await listOrders(req.user.id);
     res.status(200).json({ success: true, data });
   } catch (err) {
@@ -390,6 +434,9 @@ export async function openBeginner(req: Request, res: Response, next: NextFuncti
         stableNetworkId: stable.networkId,
         stableTokenId: stable.tokenId,
         leverage: parsed.data.leverage,
+        takeProfitPct: parsed.data.takeProfitPct,
+        stopLossPct: parsed.data.stopLossPct,
+        expiresInHours: parsed.data.expiresInHours,
         entryPrice: meta.price,
       });
       res.status(201).json({ success: true, data });
@@ -586,6 +633,21 @@ export async function listAssets(req: Request, res: Response, next: NextFunction
         })),
     ];
     res.status(200).json({ success: true, data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /settlement — default settlement leg per source network for brackets,
+ * beginner positions and emergency exits. The terminal shows this so the
+ * operator always knows which stablecoin on which chain an exit settles in.
+ * Same-chain everywhere except bitcoin/tron (USDC on Base, cross-chain).
+ */
+export async function getSettlement(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) throw new UnauthorizedError();
+    res.status(200).json({ success: true, data: { ...DEFAULT_SETTLEMENT_BY_NETWORK } });
   } catch (err) {
     next(err);
   }

@@ -3,23 +3,20 @@
  * -------
  * Shared TypeScript types and interfaces for the AI-native Agent / Muse layer.
  * This is the single source of truth for request/response shapes, tool contracts,
- * policy decisions, proposal structures, and AgentKey scopes that flow between
+ * policy decisions, and proposal structures that flow between
  * the Gateway, Muse Orchestrator, Policy Engine, tools, and audit trail.
  *
  * KEY SECURITY & DESIGN CONSTRAINTS
  * ---------------------------------
  * - Muse never moves money. Types must make it impossible for a "proposal"
  *   to be confused with an executable order.
- * - Agent Keys may only carry 'read' and/or 'trade' scopes. Withdraw is forbidden.
+ * - Withdraw is forbidden to the agent layer.
  * - Dry-run is the default; live execution requires an explicit ALLOW from the
  *   deterministic Policy Engine.
  * - Every intelligent action must be fully auditable (AuditEvent shape required).
  * - Types must align with existing exchange domain models (balances, orders,
  *   ledger entries) but must not leak internal Prisma models.
  */
-
-/** AgentKey scopes — withdraw is intentionally absent and must never be added. */
-export type AgentKeyScope = 'read' | 'trade';
 
 /** Specialist roles in the Muse crew. */
 export type AgentRoleId =
@@ -56,12 +53,9 @@ export interface PolicyDecision {
   };
 }
 
-/** Principal attached after AgentKey or JWT auth. */
+/** Principal attached after user JWT auth. */
 export interface AgentPrincipal {
   userId: string;
-  /** Present when authenticated via AgentKey; absent for user JWT sessions. */
-  agentKeyId?: string;
-  scopes: AgentKeyScope[];
   email?: string;
   role?: string;
 }
@@ -136,6 +130,11 @@ export interface Proposal {
   actions: ProposalAction[];
   risks: string[];
   assumptions: string[];
+  /**
+   * Kill criteria: concrete conditions that would invalidate this proposal
+   * (mined from red-team "what would change my mind" lines, or model-emitted).
+   */
+  invalidation?: string[];
   critique?: string;
   policy?: PolicyDecision;
   /** Deterministic verification performed outside the model. */
@@ -161,6 +160,12 @@ export interface PortfolioBalanceView {
   updatedAt: string | null;
   markUsd?: number | null;
   markStale?: boolean;
+  /**
+   * Epoch ms when markUsd was fetched. Lets verification judge a mark by its
+   * own age (analysis window) instead of the 3s settlement bar alone, so a
+   * price fetched during this run stays a valid proposal base.
+   */
+  markUpdatedAt?: number | null;
   /** USD value of available + locked at the current mark. */
   valueUsd?: number | null;
   /** Share of total portfolio value (0-100). */
@@ -222,15 +227,12 @@ export type AuditEventType =
   | 'PROPOSAL_CREATED'
   | 'PROPOSAL_VERIFIED'
   | 'AGENT_ERROR'
-  | 'AGENT_KEY_CREATED'
-  | 'AGENT_KEY_REVOKED'
   | 'KILL_SWITCH';
 
 export interface AuditEvent {
   id?: string;
   type: AuditEventType;
   userId: string;
-  agentKeyId?: string;
   actionId?: string;
   capability?: MuseCapability;
   message: string;
@@ -326,9 +328,27 @@ export interface CrewTurnView {
 
 export type CrewMode = 'fast' | 'deep';
 
+/** AI restatement of the user's ask, read before the crew runs (see intentBrief.ts). */
+export interface IntentBrief {
+  /** One plain sentence stating what the user wants (<=160 chars). */
+  restated: string;
+  /** Uppercase symbols named or clearly implied (max 4). */
+  assets: string[];
+  /** True when the user wants a trade/swap/rotation/plan, not just an answer. */
+  wantsAction: boolean;
+  /** Tool names the crew will likely need (subset of the 6 known tools). */
+  needsTools: string[];
+  /** Short strings naming what is unclear (max 3, empty when clear). */
+  uncertainties: string[];
+  /** True when spelling/grammar is broken but intent was still recoverable. */
+  messy: boolean;
+}
+
 /** Streaming event emitted while the crew runs (SSE / UI timeline). */
 export type CrewEvent =
   | { type: 'start'; actionId: string; capability: MuseCapability; mode: CrewMode; totalRoles: number }
+  | { type: 'intent'; brief: IntentBrief }
+  | { type: 'thread'; threadId: string; followUp: boolean; parentActionId?: string | null }
   | { type: 'role_start'; role: string; index: number; total: number }
   | { type: 'role_complete'; role: string; index: number; total: number; content: string; summary?: string; model?: string; degraded?: boolean; toolCount: number; repairAttempts?: number; finalNudge?: boolean }
   | { type: 'tool_start'; role: string; tool: string; params: Record<string, unknown> }
@@ -344,6 +364,11 @@ export interface AgentServiceResult {
   actionId: string;
   capability: MuseCapability;
   dryRun: boolean;
+  /** Owning conversation thread (follow-ups reuse it). */
+  threadId?: string | null;
+  /** True when this run continued a prior run instead of cold-starting. */
+  followUp?: boolean;
+  parentActionId?: string | null;
   content: string;
   proposal?: Proposal;
   toolResults?: ToolResult[];

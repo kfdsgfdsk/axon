@@ -1,5 +1,5 @@
 /**
- * Thorough unit tests for Muse tools registry, scope enforcement,
+ * Thorough unit tests for Muse tools registry
  * and individual tool handlers (with mocked domain services).
  *
  * Invariant under test: Muse never moves money — tools are read/quote only.
@@ -47,7 +47,6 @@ jest.mock('../../../src/services/blockchain/tokenRegistry.service', () => ({
 }));
 
 import {
-  assertToolScope,
   executeTool,
   toolRegistry,
   toolDefinitions,
@@ -58,16 +57,14 @@ import { simulateTool } from '../../../src/modules/agent/tools/simulate.tool';
 import { ordersTool } from '../../../src/modules/agent/tools/orders.tool';
 import { pricesTool } from '../../../src/modules/agent/tools/prices.tool';
 import { ledgerTool } from '../../../src/modules/agent/tools/ledger.tool';
-import { ForbiddenError, ValidationError } from '../../../src/utils/errors';
+import { ValidationError } from '../../../src/utils/errors';
 import type { AgentPrincipal, ToolContext } from '../../../src/modules/agent/types';
 import * as balanceService from '../../../src/modules/balances/balance.service';
 import * as tradeService from '../../../src/modules/trading/trade.service';
 import prisma from '../../../src/lib/prisma';
 
-const principal = (scopes: AgentPrincipal['scopes'] = ['read', 'trade']): AgentPrincipal => ({
+const principal = (): AgentPrincipal => ({
   userId: 'u-1',
-  agentKeyId: 'ak-1',
-  scopes,
 });
 
 const ctx = (overrides: Partial<ToolContext> = {}): ToolContext => ({
@@ -105,27 +102,6 @@ describe('tool registry & definitions', () => {
   });
 });
 
-describe('assertToolScope', () => {
-  test('read scope allows all current tools', () => {
-    const c = ctx({ principal: principal(['read']) });
-    for (const name of Object.keys(toolRegistry) as Array<keyof typeof toolRegistry>) {
-      expect(() => assertToolScope(name, c)).not.toThrow();
-    }
-  });
-
-  test('empty scopes forbidden for any tool', () => {
-    const c = ctx({ principal: principal([]) });
-    expect(() => assertToolScope('balances', c)).toThrow(ForbiddenError);
-    expect(() => assertToolScope('simulate', c)).toThrow(ForbiddenError);
-  });
-
-  test('trade scope alone is sufficient', () => {
-    const c = ctx({ principal: principal(['trade']) });
-    expect(() => assertToolScope('balances', c)).not.toThrow();
-    expect(() => assertToolScope('simulate', c)).not.toThrow();
-  });
-});
-
 describe('executeTool', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -134,13 +110,6 @@ describe('executeTool', () => {
   test('unknown tool → ValidationError', async () => {
     await expect(executeTool('withdraw', {}, ctx())).rejects.toThrow(ValidationError);
     await expect(executeTool('unknown', {}, ctx())).rejects.toThrow(/Unknown tool/);
-  });
-
-  test('scope check runs before handler', async () => {
-    await expect(
-      executeTool('balances', {}, ctx({ principal: principal([]) }))
-    ).rejects.toThrow(ForbiddenError);
-    expect(balanceService.getUserBalances).not.toHaveBeenCalled();
   });
 });
 

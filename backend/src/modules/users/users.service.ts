@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import prisma from '../../lib/prisma';
 import config from '../../config';
 import {
+  AppError,
   ValidationError,
   UnauthorizedError,
   NotFoundError,
@@ -160,6 +161,50 @@ export async function changePassword(
   await prisma.trustedDevice.deleteMany({ where: { userId } });
 }
 
+export async function changeEmail(
+  userId: string,
+  currentPassword: string,
+  newEmail: string
+) {
+  const normalized = newEmail.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+    throw new ValidationError('Valid email required');
+  }
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+  if (!ok) throw new UnauthorizedError('Current password is incorrect');
+  if (normalized === user.email.toLowerCase()) {
+    throw new ValidationError('New email must differ from current email');
+  }
+  const taken = await prisma.user.findUnique({ where: { email: normalized } });
+  if (taken) throw new ValidationError('Email is already in use');
+
+  const updated = await prisma.user.update({
+    where: { id: userId },
+    data: { email: normalized, emailVerifiedAt: null },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      emailVerifiedAt: true,
+      phone: true,
+      phoneVerifiedAt: true,
+      twoFactorEnabled: true,
+      twoFactorMethod: true,
+      createdAt: true,
+      updatedAt: true,
+      passwordChangedAt: true,
+    },
+  });
+  // Notify the OLD address: if this was not the owner, they still get word.
+  void notifySecurityEvent('email_changed', {
+    userId,
+    email: user.email,
+    meta: { newEmailPreview: normalized.replace(/(^.).*(@.*$)/, '$1***$2') },
+  });
+  return updated;
+}
+
 export async function requestPasswordReset(email: string): Promise<{ sent: boolean }> {
   warnMailTransportOnce();
   // Throttle applies before the user lookup so timing does not enumerate (S-M12).
@@ -236,10 +281,27 @@ export async function resetPassword(token: string, newPassword: string): Promise
 }
 
 
-export async function requestEmailVerification(userId: string): Promise<{ sent: boolean }> {
+/** True when the operator configured an outbound mail transport. */
+export function mailTransportConfigured(): boolean {
+  return Boolean(config.mail?.transport && String(config.mail.transport).trim());
+}
+
+export async function requestEmailVerification(
+  userId: string,
+  opts?: { demo?: boolean }
+): Promise<{ sent: boolean }> {
   warnMailTransportOnce();
   const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
   if (user.emailVerifiedAt) return { sent: false };
+  // Live runs must actually deliver: without MAIL_TRANSPORT the "sent"
+  // response would be a lie, so fail loudly instead of faking success.
+  // Demo runs fake delivery by design (token is logged in non-prod below).
+  if (!opts?.demo && !mailTransportConfigured()) {
+    throw new AppError(
+      'Email delivery is not configured (set MAIL_TRANSPORT)',
+      503
+    );
+  }
   if (await emailCooldownHit('emailverify', userId)) return { sent: true };
 
   const raw = crypto.randomBytes(32).toString('hex');
@@ -256,6 +318,7 @@ export async function requestEmailVerification(userId: string): Promise<{ sent: 
   if (!config.isProdLike) {
     logger.info(`[DEV] Email verify token for ${user.email}: ${raw}`);
   }
+  // TODO (S-M12): deliver the link via the configured MAIL_TRANSPORT sender.
   return { sent: true };
 }
 

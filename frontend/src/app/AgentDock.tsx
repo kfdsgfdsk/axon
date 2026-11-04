@@ -2,6 +2,7 @@ import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button } from '../ui/primitives';
 import { IconAgent } from '../ui/icons';
+import { dockSuggestionsFor, useDockContext } from '../ui/AskDesk';
 
 /* Persistent bottom command bar — the fastest path to the crew. Hidden on /agent. */
 export function AgentDock() {
@@ -9,6 +10,7 @@ export function AgentDock() {
   const nav = useNavigate();
   const [draft, setDraft] = React.useState('');
   const [open, setOpen] = React.useState(false);
+  const ctx = useDockContext();
 
   if (loc.pathname === '/agent') return null;
 
@@ -22,18 +24,19 @@ export function AgentDock() {
     nav('/agent');
   };
 
-  const quick = [
-    'Review my portfolio',
-    'Draft a $2k plan',
-    'What is my open risk?',
-  ];
+  // First quick action is the on-screen page's contextual prompt (built from
+  // the user's actual parameters); the rest stay general route-level prompts.
+  const routeQuick = dockSuggestionsFor(loc.pathname);
+  const quick = ctx
+    ? [ctx, ...routeQuick.filter((q) => q.label !== ctx.label)]
+    : routeQuick;
 
   return (
     <div className="dock">
       {open && (
         <div className="dock-cap">
           {quick.map((q) => (
-            <button key={q} onClick={() => send(q)}>{q}</button>
+            <button key={q.label} title={q.prompt} onClick={() => send(q.prompt)}>{q.label}</button>
           ))}
         </div>
       )}

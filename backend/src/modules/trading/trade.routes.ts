@@ -17,6 +17,7 @@ import {
   streamPrices,
   watchPrices,
   listAssets,
+  getSettlement,
 } from './trade.controller';
 import {
   authenticate,
@@ -109,6 +110,19 @@ router.get('/prices', priceLimiter, getPrices);
  *         description: Asset catalog
  */
 router.get('/assets', priceLimiter, listAssets);
+
+/**
+ * @openapi
+ * /api/v1/trade/settlement:
+ *   get:
+ *     tags: [Trading]
+ *     summary: Default settlement leg per source network
+ *     description: Which stablecoin on which chain brackets, positions and emergency exits settle in when the caller does not choose one.
+ *     responses:
+ *       200:
+ *         description: Settlement matrix
+ */
+router.get('/settlement', priceLimiter, getSettlement);
 
 /**
  * @openapi

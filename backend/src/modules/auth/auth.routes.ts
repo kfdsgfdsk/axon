@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import { register, login, refresh, logout } from './auth.controller';
 import { createRateLimiter, userRateLimit } from '../../middleware/rateLimit.middleware';
 
@@ -10,6 +11,34 @@ const authIpLimiter = createRateLimiter({
   max: 20,
   prefix: 'rl:auth:ip',
   message: { success: false, message: 'Too many auth attempts, try again later' },
+});
+
+/**
+ * Refresh is keyed by IP + presented-token hash, not bare IP: a healthy tab
+ * refreshes ~once per 15min, but one stale tab replaying a dead token every
+ * poll cycle must burn only its own bucket — never starve other clients
+ * behind the same NAT (which previously 429'd their legitimate rotations).
+ * A loose per-IP backstop still caps distributed refresh floods.
+ */
+const refreshTokenLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  prefix: 'rl:auth:refresh',
+  message: { success: false, message: 'Too many refresh attempts, try again later' },
+  keyGenerator: (req) => {
+    const tok = (req.body as { refreshToken?: unknown } | undefined)?.refreshToken;
+    const fp = typeof tok === 'string' && tok
+      ? crypto.createHash('sha256').update(tok).digest('hex').slice(0, 16)
+      : 'anonymous';
+    return `${req.ip}:${fp}`;
+  },
+});
+
+const refreshIpBackstop = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  prefix: 'rl:auth:refreship',
+  message: { success: false, message: 'Too many refresh attempts, try again later' },
 });
 
 /**
@@ -84,7 +113,7 @@ router.post('/login', loginIpLimiter, login);
  *     tags: [Auth]
  *     summary: Rotate refresh token to new access + refresh pair (atomic)
  */
-router.post('/refresh', authIpLimiter, refresh);
+router.post('/refresh', refreshIpBackstop, refreshTokenLimiter, refresh);
 
 /**
  * @openapi

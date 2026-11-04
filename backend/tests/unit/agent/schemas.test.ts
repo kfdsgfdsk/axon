@@ -5,8 +5,6 @@
  */
 
 import {
-  agentKeyScopeSchema,
-  createAgentKeySchema,
   agentChatSchema,
   agentCopilotSchema,
   agentPlanSchema,
@@ -20,47 +18,6 @@ import {
   ordersToolParamsSchema,
   ledgerToolParamsSchema,
 } from '../../../src/modules/agent/schemas';
-
-describe('Agent schemas — scopes & keys', () => {
-  test('agentKeyScopeSchema accepts only read | trade', () => {
-    expect(agentKeyScopeSchema.parse('read')).toBe('read');
-    expect(agentKeyScopeSchema.parse('trade')).toBe('trade');
-    expect(() => agentKeyScopeSchema.parse('withdraw')).toThrow();
-    expect(() => agentKeyScopeSchema.parse('admin')).toThrow();
-    expect(() => agentKeyScopeSchema.parse('')).toThrow();
-  });
-
-  test('createAgentKeySchema — happy path', () => {
-    const r = createAgentKeySchema.parse({
-      name: 'copilot-key',
-      scopes: ['read', 'trade'],
-    });
-    expect(r.name).toBe('copilot-key');
-    expect(r.scopes).toEqual(['read', 'trade']);
-    expect(r.expiresAt).toBeUndefined();
-  });
-
-  test('createAgentKeySchema — optional expiry', () => {
-    const exp = new Date(Date.now() + 86400000).toISOString();
-    const r = createAgentKeySchema.parse({
-      name: 'temp',
-      scopes: ['read'],
-      expiresAt: exp,
-    });
-    expect(r.expiresAt).toBe(exp);
-  });
-
-  test('createAgentKeySchema — rejects empty name / empty scopes / withdraw', () => {
-    expect(() => createAgentKeySchema.parse({ name: '', scopes: ['read'] })).toThrow();
-    expect(() => createAgentKeySchema.parse({ name: 'x', scopes: [] })).toThrow();
-    expect(() =>
-      createAgentKeySchema.parse({ name: 'x', scopes: ['read', 'withdraw'] as any })
-    ).toThrow();
-    expect(() =>
-      createAgentKeySchema.parse({ name: 'x'.repeat(65), scopes: ['read'] })
-    ).toThrow();
-  });
-});
 
 describe('Agent schemas — request bodies', () => {
   test('agentChatSchema defaults dryRun=true', () => {

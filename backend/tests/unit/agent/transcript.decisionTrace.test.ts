@@ -69,7 +69,7 @@ const mockExecTool = executeTool as jest.MockedFunction<typeof executeTool>;
 const mockCreateMany = (prisma as unknown as { agentTranscriptEntry: { createMany: jest.Mock } })
   .agentTranscriptEntry.createMany;
 
-const principal: AgentPrincipal = { userId: 'user-dt', agentKeyId: 'ak-dt', scopes: ['read', 'trade'] };
+const principal: AgentPrincipal = { userId: 'user-dt' };
 const policy: PolicyDecision = { kind: 'DRY_RUN', reasons: ['default dry-run'] };
 
 const portfolio: PortfolioContext = {

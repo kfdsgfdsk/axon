@@ -326,6 +326,16 @@ async function issueTokens(
 }
 
 /**
+ * Reuse-nuke horizon: only a replay of a RECENTLY revoked token nukes the
+ * family (live rotation chain forked = theft signal). A replay of a token
+ * revoked long ago is a stale client (background tab, dead app), not in-flight
+ * theft — nuking on every such replay lets one forgotten tab keep killing the
+ * user's fresh sessions and spam revokes forever. Stale replays get a quiet
+ * expired-session 401 with no family revoke.
+ */
+const REUSE_NUKE_MS = 60 * 60_000;
+
+/**
  * Refresh-token reuse detection: a already-revoked (rotated) token being
  * presented again indicates theft. Revoke the entire token family for the user.
  */
@@ -406,12 +416,17 @@ export async function refresh(refreshToken: string): Promise<TokenPair> {
     throw new UnauthorizedError('Invalid or expired refresh token');
   }
 
-  // Already revoked → grace replay or reuse / theft
+  // Already revoked → grace replay, live-chain reuse (theft), or stale replay
   if (stored.revokedAt) {
     const graced = await readRefreshGrace(tokenHash);
     if (graced) return graced;
-    await revokeTokenFamily(stored.userId);
-    throw new UnauthorizedError('Refresh token reuse detected; all sessions revoked');
+    const revokedAgeMs = Date.now() - new Date(stored.revokedAt).getTime();
+    if (revokedAgeMs < REUSE_NUKE_MS) {
+      await revokeTokenFamily(stored.userId);
+      throw new UnauthorizedError('Refresh token reuse detected; all sessions revoked');
+    }
+    // Token died long ago — stale client, not theft. Quiet 401, no nuke.
+    throw new UnauthorizedError('Invalid or expired refresh token');
   }
 
   if (stored.expiresAt < new Date()) {

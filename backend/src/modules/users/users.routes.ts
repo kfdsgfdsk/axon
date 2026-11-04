@@ -3,6 +3,7 @@ import {
   getMe,
   patchMe,
   changePassword,
+  changeEmail,
   forgotPassword,
   resetPassword,
   requestEmailVerify,
@@ -86,6 +87,31 @@ router.post('/me/password', authenticate, csrfProtection, sensitiveLimiter, chan
 
 /**
  * @openapi
+ * /api/v1/users/me/email:
+ *   post:
+ *     tags: [Users]
+ *     summary: Change email (requires current password; resets verification)
+ *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [currentPassword, newEmail]
+ *             properties:
+ *               currentPassword: { type: string, minLength: 8, example: "CurrentPass123!" }
+ *               newEmail: { type: string, format: email, example: "new@example.com" }
+ *     responses:
+ *       200:
+ *         description: Updated profile (emailVerifiedAt reset to null)
+ *       401:
+ *         description: Current password incorrect
+ */
+router.post('/me/email', authenticate, csrfProtection, sensitiveLimiter, changeEmail);
+
+/**
+ * @openapi
  * /api/v1/users/password/forgot:
  *   post:
  *     tags: [Users]
@@ -136,9 +162,21 @@ router.post('/password/reset', sensitiveLimiter, resetPassword);
  *     tags: [Users]
  *     summary: Send email verification link
  *     security: [{ bearerAuth: [] }]
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               demo:
+ *                 type: boolean
+ *                 description: Demo mode fakes delivery; live requires MAIL_TRANSPORT
  *     responses:
  *       200:
  *         description: Email sent (or already verified)
+ *       503:
+ *         description: Live request but MAIL_TRANSPORT is not configured
  */
 router.post('/me/email/verify-request', authenticate, csrfProtection, requestEmailVerify);
 

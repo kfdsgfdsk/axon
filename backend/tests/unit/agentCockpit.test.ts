@@ -1,6 +1,7 @@
 import {
-  attackVectorsOf, decideRun, freshRun, policyChecksOf, reduceCockpit, runConfidenceOf,
-} from '../../frontend/src/features/agent/cockpit';
+  appendDecisionLog, attackVectorsOf, capabilityTitle, decideRun, freshRun, policyChecksOf,
+  recordFromRun, reduceCockpit, runConfidenceOf,
+} from '../../../frontend/src/features/agent/cockpit';
 
 function feed(events: any[]) {
   let run = freshRun('grow stables', 'plan', 'deep');
@@ -88,9 +89,85 @@ describe('cockpit debate reducer', () => {
     expect(r4.turns[0].thesis).toBe('Approved.');
   });
 
+  test('decision log appends are idempotent per run+decision', () => {
+    const store = new Map<string, string>();
+    (global as any).sessionStorage = {
+      getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+      setItem: (k: string, v: string) => { store.set(k, v); },
+    };
+    try {
+      const run: any = {
+        ...freshRun('quick read', 'reactive', 'fast'),
+        actionId: 'a1', confidence: 88,
+        policy: { decision: 'DRY_RUN', reasons: [] },
+        proposal: { actions: [{ type: 'HOLD' }] },
+      };
+      appendDecisionLog(recordFromRun(run, 'COMPLETED'));
+      const replayed = appendDecisionLog(recordFromRun(run, 'COMPLETED'));
+      expect(replayed.filter((r) => r.decision === 'COMPLETED')).toHaveLength(1);
+      const approved = appendDecisionLog(recordFromRun(run, 'APPROVED'));
+      expect(approved.filter((r) => r.id === 'a1')).toHaveLength(2);
+    } finally {
+      delete (global as any).sessionStorage;
+    }
+  });
+
   test('unknown events never crash the run', () => {
     const run = feed([{ type: 'weird_future_event' }, null, { nope: true }]);
     expect(run.running).toBe(true);
     expect(run.rounds).toHaveLength(4);
+  });
+
+  test('thread event tags the run (follow-up vs fresh)', () => {
+    const follow = feed([
+      { type: 'thread', threadId: 't1', followUp: true, parentActionId: 'a0' },
+    ]);
+    expect(follow.threadId).toBe('t1');
+    expect(follow.followUp).toBe(true);
+    expect(follow.parentActionId).toBe('a0');
+
+    const fresh = feed([{ type: 'thread', threadId: 't2', followUp: false }]);
+    expect(fresh.threadId).toBe('t2');
+    expect(fresh.followUp).toBe(false);
+  });
+
+  test('freshRun carries optimistic thread context; done finalizes it', () => {
+    const started = freshRun('make it smaller', 'plan', 'fast', {
+      threadId: 't1',
+      followUp: true,
+      parentActionId: 'a0',
+    });
+    expect(started.followUp).toBe(true);
+    const done = reduceCockpit(started, {
+      type: 'done',
+      result: { actionId: 'a1', threadId: 't1', followUp: true, parentActionId: 'a0' },
+    });
+    expect(done.actionId).toBe('a1');
+    expect(done.threadId).toBe('t1');
+    expect(done.running).toBe(false);
+  });
+
+  test('start event pins the server-inferred depth (run begins as auto)', () => {
+    const started = freshRun('red-team my plan', 'auto', 'deep');
+    expect(started.capability).toBe('auto');
+    const pinned = reduceCockpit(started, {
+      type: 'start',
+      actionId: 'a1',
+      capability: 'critique',
+      mode: 'deep',
+      totalRoles: 10,
+    });
+    expect(pinned.actionId).toBe('a1');
+    expect(pinned.capability).toBe('critique');
+    // A start without capability (old server) keeps the previous value.
+    const kept = reduceCockpit(started, { type: 'start', actionId: 'a2' });
+    expect(kept.capability).toBe('auto');
+  });
+
+  test('capabilityTitle renders wire modes and falls back to Auto', () => {
+    expect(capabilityTitle('reactive')).toBe('Quick take');
+    expect(capabilityTitle('plan')).toBe('Goal → plan');
+    expect(capabilityTitle('auto')).toBe('Auto');
+    expect(capabilityTitle('')).toBe('Auto');
   });
 });

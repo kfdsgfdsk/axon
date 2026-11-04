@@ -32,6 +32,7 @@ export type { AgentRoleId };
 import { randomUUID } from 'crypto';
 import { fallbackProposal } from '../modules/agent/proposal';
 import { sanitizeUntrusted } from '../modules/agent/safety';
+import { fuzzyTextHit } from '../modules/agent/intent';
 
 const ALLOWED_TOOL_NAMES = new Set<string>([
   'balances',
@@ -58,18 +59,21 @@ const ROLE_TIER: Record<AgentRoleId, 'fast' | 'strong'> = {
 };
 
 const ROLE_MAX_TOKENS: Record<AgentRoleId, number> = {
-  scout: 512,
-  simulator: 512,
-  risk: 700,
-  red_slippage: 700,
-  red_concentration: 700,
-  red_stale: 700,
-  red_policy: 700,
+  // Content budgets (reasoning headroom is added on top by outputTokenBudget).
+  // Prose roles get room to show their full working: a 512-700 cap truncated
+  // real turns mid-reasoning (finish=length, degraded role, forced HOLD).
+  scout: 2000,
+  simulator: 2000,
+  risk: 2000,
+  red_slippage: 2000,
+  red_concentration: 2000,
+  red_stale: 2000,
+  red_policy: 2000,
   // Structured roles need headroom: the live API counts ~2 tok/char and
   // truncated strategist JSON mid-string at 1400 (finish=length).
   strategist: 4000,
   judge: 4000,
-  explainer: 700,
+  explainer: 2500,
 };
 
 /**
@@ -90,14 +94,14 @@ export function outputTokenBudget(role: AgentRoleId, _reasoningEffort?: string):
 
 const TOOL_ROLES: ReadonlySet<AgentRoleId> = new Set(['scout', 'simulator']);
 
-/** Roles that earn the deep-reasoning model + full reasoning effort on deep runs. */
+/**
+ * Roles that earn the deep-reasoning model + full reasoning effort on deep runs.
+ * Red-team roles write short takes (like risk) and stay on low effort: at high
+ * effort each red burns 40-120s and the judge starves against the crew deadline.
+ */
 export const DEEP_ROLES: ReadonlySet<AgentRoleId> = new Set([
   'strategist',
   'judge',
-  'red_slippage',
-  'red_concentration',
-  'red_stale',
-  'red_policy',
 ]);
 
 export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -114,8 +118,8 @@ const REASONING_EFFORTS: ReadonlySet<string> = new Set([
 /**
  * Resolve the reasoning effort for one role call.
  * Fast mode skips the param entirely (lowest latency); deep mode gives the
- * reasoning-heavy roles the configured effort and everything else 'low'.
- * Unknown configured values fall back to 'high'. Exported for tests.
+ * structured roles (strategist/judge) the configured effort and everything
+ * else 'low'. Unknown configured values fall back to 'high'. Exported for tests.
  */
 export function resolveReasoningEffort(
   role: AgentRoleId,
@@ -175,6 +179,8 @@ export interface RoleCompletionInput {
   messages: MuseMessage[];
   tools?: MuseCompletionRequest['tools'];
   portfolioSummary?: string;
+  /** Desk mode for this run; selects the capability-aware system brief. */
+  capability?: MuseCapability;
   dryRun: boolean;
   /** Per-call timeout ceiling (the crew shrinks this as its deadline approaches). */
   timeoutMs?: number;
@@ -291,6 +297,25 @@ function demoIntent(text: string): {
   return { wantsTrade, wantsRisky, wantsWithdraw, symbols: symbols.length ? symbols : ['BTC', 'ETH'] };
 }
 
+/**
+ * Chart intent for the scripted demo provider. The real models read intent
+ * semantically (typos included) and the playbook orders the chart tool
+ * first for chart questions — the demo script must do the same, or
+ * demo-mode chart asks would answer from a single mark and the transcript
+ * would show no chart evidence. Exact stems plus the shared typo-tolerant
+ * matcher (short words exact-only: "chat" never counts as "chart").
+ */
+const DEMO_CHART_STEMS = [
+  'chart', 'pattern', 'breakout', 'breakdown', 'support', 'resistance',
+  'volume', 'trend', 'momentum', 'technical', 'analysis', 'analytics',
+  'analytic', 'volatility', 'overbought', 'oversold', 'level', 'quant',
+];
+
+function demoWantsChart(text: string): boolean {
+  if (/\b(price action|key levels?)\b/.test(text)) return true;
+  return fuzzyTextHit(text, DEMO_CHART_STEMS);
+}
+
 function demoAction(text: string): Proposal['actions'] {
   const intent = demoIntent(text);
   if (intent.wantsWithdraw) {
@@ -371,13 +396,19 @@ function demoRoleCompletion(input: RoleCompletionInput): MuseCompletionResponse 
       if (!hasToolResult(input, 'balances')) {
         content = 'Fetching balances first; I will request marks next. No trades proposed.';
         toolCalls = [{ id: randomUUID(), name: 'balances', params: {} }];
+      } else if (demoWantsChart(text) && !hasToolResult(input, 'chart')) {
+        content = `Chart question detected. Pulling 24h price history for ${intent.symbols[0]} before marks; a spot mark is never a momentum signal.`;
+        toolCalls = [
+          { id: randomUUID(), name: 'chart', params: { symbol: intent.symbols[0] } },
+        ];
       } else if (!hasToolResult(input, 'prices')) {
         content = 'Balances loaded. Requesting fresh marks for sizing. No trades proposed.';
         toolCalls = [
           { id: randomUUID(), name: 'prices', params: { symbols: intent.symbols } },
         ];
       } else {
-        content = `Facts gathered for ${intent.symbols.join(', ')}: balances and marks. No trades proposed.`;
+        const withChart = hasToolResult(input, 'chart') ? ', chart history' : '';
+        content = `Facts gathered for ${intent.symbols.join(', ')}: balances${withChart} and marks. No trades proposed.`;
       }
       break;
     case 'simulator': {
@@ -443,7 +474,9 @@ function demoRoleCompletion(input: RoleCompletionInput): MuseCompletionResponse 
     case 'explainer':
       content = intent.wantsWithdraw
         ? 'The agent cannot withdraw funds. It can analyse, plan, and (with policy approval) place trades.'
-        : `Muse reviewed ${intent.symbols.join(', ')} and recommends a small, policy-gated step. Nothing executes while in dry-run.`;
+        : !intent.wantsTrade && demoWantsChart(text)
+          ? `Muse read the ${intent.symbols.join(', ')} 24h chart from real price history — trend, range, and key levels are in the chart evidence above. Informational read only; nothing to execute.`
+          : `Muse reviewed ${intent.symbols.join(', ')} and recommends a small, policy-gated step. Nothing executes while in dry-run.`;
       break;
     default:
       content = `${input.role} demo output`;
@@ -598,7 +631,7 @@ function buildBody(
   jsonLevel: JsonLevel,
   strip: BodyStripOptions = {}
 ): Record<string, unknown> {
-  const system = systemPrompt(input.role);
+  const system = systemPrompt(input.role, input.capability);
   const messages: MuseMessage[] = [
     { role: 'system', content: system },
     ...(input.portfolioSummary

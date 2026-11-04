@@ -3,7 +3,7 @@
  * -------
  * Deterministic Policy Engine middleware (NEVER AI-powered). Decides
  * ALLOW | DENY | DRY_RUN for every agent request using hard rules that
- * reuse existing money-safety invariants (scopes, kill switch, dry-run
+ * reuse existing money-safety invariants (kill switch, dry-run
  * default, notional ceilings, feature flags).
  *
  * KEY SECURITY & DESIGN CONSTRAINTS
@@ -11,7 +11,6 @@
  * - Fully deterministic. No model calls.
  * - Muse never moves money; this layer is the only path that can upgrade
  *   a request from DRY_RUN to ALLOW (and only under strict conditions).
- * - Agent Keys: never grant withdraw; enforce read vs trade.
  * - Kill switch must short-circuit everything to DENY.
  */
 
@@ -31,14 +30,6 @@ declare global {
     }
   }
 }
-
-const CAPABILITY_MIN_SCOPE: Record<MuseCapability, 'read' | 'trade'> = {
-  reactive: 'read',
-  copilot: 'read',
-  plan: 'read',
-  strategy: 'trade',
-  critique: 'read',
-};
 
 export function evaluatePolicy(input: {
   principal: AgentPrincipal;
@@ -62,34 +53,12 @@ export function evaluatePolicy(input: {
     };
   }
 
-  const minScope = CAPABILITY_MIN_SCOPE[input.capability];
-  const scopes = input.principal.scopes || [];
-  if (minScope === 'trade' && !scopes.includes('trade')) {
-    return {
-      kind: 'DENY',
-      reasons: [`Capability ${input.capability} requires trade scope`],
-    };
-  }
-  if (!scopes.includes('read') && !scopes.includes('trade')) {
-    return {
-      kind: 'DENY',
-      reasons: ['Agent principal has no valid scopes'],
-    };
-  }
-
   const dryRunDefault = config.agent.dryRunDefault !== false;
   if (input.requestedDryRun || dryRunDefault || !input.liveRequested) {
     reasons.push('Dry-run is the default for intelligent actions');
     if (!input.liveRequested) reasons.push('Caller did not request live execution');
     if (dryRunDefault) reasons.push('AGENT_DRY_RUN_DEFAULT is true');
     return { kind: 'DRY_RUN', reasons };
-  }
-
-  if (!scopes.includes('trade')) {
-    return {
-      kind: 'DENY',
-      reasons: ['Live execution requires trade scope'],
-    };
   }
 
   if (!config.agent.allowLiveExecution) {
@@ -99,7 +68,7 @@ export function evaluatePolicy(input: {
 
   return {
     kind: 'ALLOW',
-    reasons: ['Trade scope present', 'Live requested', 'allowLiveExecution enabled'],
+    reasons: ['Authenticated user', 'Live requested', 'allowLiveExecution enabled'],
     constraints: {
       maxNotionalUsd: config.agent.maxNotionalUsd,
       maxSlippageBps: config.agent.maxSlippageBps,
@@ -164,5 +133,5 @@ export async function attachPolicyAudit(
   principal: AgentPrincipal,
   decision: PolicyDecision
 ): Promise<void> {
-  await logPolicyDecision(actionId, principal.userId, principal.agentKeyId, decision);
+  await logPolicyDecision(actionId, principal.userId, decision);
 }

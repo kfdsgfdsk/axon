@@ -32,9 +32,10 @@ describe('outputTokenBudget reasoning headroom', () => {
   test('headroom is flat: the model reasons hard even with no effort param', () => {
     // Live-measured: ~1200-3100 reasoning tokens with the param OMITTED.
     for (const effort of ['high', 'xhigh', 'max', 'low', undefined]) {
-      expect(outputTokenBudget('red_slippage', effort)).toBe(700 + 6000);
+      expect(outputTokenBudget('red_slippage', effort)).toBe(2000 + 6000);
     }
-    expect(outputTokenBudget('scout', undefined)).toBe(512 + 6000);
+    expect(outputTokenBudget('scout', undefined)).toBe(2000 + 6000);
+    expect(outputTokenBudget('explainer', undefined)).toBe(2500 + 6000);
   });
 
   test('structured roles keep the largest absolute budget', () => {

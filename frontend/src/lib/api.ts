@@ -22,6 +22,8 @@ export const tokens = {
   set(access: string | null, refresh: string | null) {
     if (access) localStorage.setItem(LS_ACCESS, access); else localStorage.removeItem(LS_ACCESS);
     if (refresh) localStorage.setItem(LS_REFRESH, refresh); else localStorage.removeItem(LS_REFRESH);
+    // Fresh credentials lift the dead-refresh latch (declared below; runs at call time).
+    refreshDead = false;
   },
   clear() { localStorage.removeItem(LS_ACCESS); localStorage.removeItem(LS_REFRESH); },
 };
@@ -71,21 +73,56 @@ async function raw(path: string, o: Opts = {}, access?: string | null): Promise<
   });
 }
 
-export async function api<T = unknown>(path: string, o: Opts = {}): Promise<T> {
-  let r = await raw(path, o);
-  if (r.status === 401 && o.auth !== false && tokens.refresh) {
-    // One silent refresh, then retry.
-    try {
-      const rr = await raw('/api/v1/auth/refresh', { method: 'POST', body: { refreshToken: tokens.refresh }, auth: false });
-      if (rr.ok) {
+/** Shared in-flight refresh: concurrent 401s await one rotation, never stampede. */
+let refreshFlight: Promise<boolean> | null = null;
+/**
+ * Latched when the server rejects the refresh token itself (401 reuse /
+ * revoked / expired). Refresh 401s are permanent — without this latch every
+ * poller would retry every cycle, burning the auth bucket and logging a
+ * 401 storm. A fresh login (tokens.set) clears it.
+ */
+let refreshDead = false;
+
+/** True once the server has rejected the refresh token itself (session gone). */
+export function isRefreshDead(): boolean { return refreshDead; }
+
+/** Fired once when the session is proven dead so the app can route to login. */
+export const AUTH_DEAD_EVENT = 'axon:auth-dead';
+
+function markRefreshDead(): void {
+  if (refreshDead) return;
+  refreshDead = true;
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(AUTH_DEAD_EVENT));
+}
+
+async function rotateSilently(): Promise<boolean> {
+  if (!tokens.refresh || refreshDead) return false;
+  if (!refreshFlight) {
+    refreshFlight = (async () => {
+      try {
+        const rr = await raw('/api/v1/auth/refresh', { method: 'POST', body: { refreshToken: tokens.refresh }, auth: false });
+        if (rr.status === 401) { markRefreshDead(); return false; }
+        if (!rr.ok) return false;
         const j = await rr.json();
         const d = j?.data || j;
-        if (d?.accessToken) {
-          tokens.set(d.accessToken, d.refreshToken || tokens.refresh);
-          r = await raw(path, o);
-        }
+        if (!d?.accessToken) return false;
+        tokens.set(d.accessToken, d.refreshToken || tokens.refresh);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        refreshFlight = null;
       }
-    } catch { /* fall through to error */ }
+    })();
+  }
+  return refreshFlight;
+}
+
+export async function api<T = unknown>(path: string, o: Opts = {}): Promise<T> {
+  let r = await raw(path, o);
+  if (r.status === 401 && o.auth !== false && tokens.refresh && !refreshDead) {
+    // One silent shared refresh, then retry once.
+    if (await rotateSilently()) r = await raw(path, o);
   }
   if (r.status === 204) return undefined as T;
   let j: any = null;

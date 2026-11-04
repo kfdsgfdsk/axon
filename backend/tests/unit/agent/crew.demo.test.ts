@@ -34,8 +34,6 @@ import { buildPortfolioContext } from '../../../src/modules/agent/portfolio.serv
 
 const principal: AgentPrincipal = {
   userId: 'u-demo',
-  agentKeyId: 'k-demo',
-  scopes: ['read', 'trade'],
 };
 
 const policy: PolicyDecision = {
@@ -121,6 +119,20 @@ describe('crew demo pipeline (deterministic provider)', () => {
     expect(events).toContain('verification');
     expect(result.proposal?.actions[0].type).toBe('MARKET_SWAP');
     expect(result.proposal?.verification?.ok).toBe(true);
+  });
+
+  test('chart question gathers a chart observation in demo mode', async () => {
+    const result = await runCrew({
+      principal,
+      capability: 'reactive',
+      userMessage: 'sol sharts analtics?',
+      dryRun: true,
+      policy,
+      mode: 'fast',
+    });
+
+    expect(result.demo).toBe(true);
+    expect(result.toolResults?.map((t) => t.name)).toContain('chart');
   });
 
   test('deep mode adds a simulator quote and the red-team debate', async () => {

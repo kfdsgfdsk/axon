@@ -20,7 +20,8 @@ export type SecurityEvent =
   | 'withdrawal_address_added'
   | 'withdrawal_requested'
   | 'role_changed'
-  | 'email_verification_sent';
+  | 'email_verification_sent'
+  | 'email_changed';
 
 export interface NotifyPayload {
   userId?: string;
@@ -74,6 +75,7 @@ export async function notifySecurityEvent(
       withdrawal_requested: 'Withdrawal requested',
       role_changed: 'Account role changed',
       email_verification_sent: 'Verify your email',
+      email_changed: 'Your email was changed',
     };
 
     const subject = subjects[event] || `Account activity: ${event}`;

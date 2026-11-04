@@ -6,12 +6,13 @@
  * Muse never moves money.
  */
 
-import { runCrew } from './crew/crew.orchestrator';
+import { runCrew, runSafetyRefusal } from './crew/crew.orchestrator';
 import type {
   AgentPrincipal,
   AgentServiceResult,
   CrewEvent,
   CrewMode,
+  IntentBrief,
   MuseCapability,
   MuseMessage,
   PolicyDecision,
@@ -27,6 +28,10 @@ export async function orchestrate(input: {
   onEvent?: (event: CrewEvent) => void;
   extraMessages?: MuseMessage[];
   demoBook?: boolean;
+  threadId?: string | null;
+  followUp?: { parentActionId: string; block: string } | null;
+  memoryBlock?: string;
+  intentBrief?: IntentBrief | null;
 }): Promise<AgentServiceResult> {
   const extra = (input.extraMessages || [])
     .map((m) => `${m.role}: ${m.content}`)
@@ -44,7 +49,22 @@ export async function orchestrate(input: {
     mode: input.mode,
     onEvent: input.onEvent,
     demoBook: input.demoBook,
+    threadId: input.threadId,
+    followUp: input.followUp,
+    memoryBlock: input.memoryBlock,
+    intentBrief: input.intentBrief,
   });
+}
+
+/** Instant deterministic refusal — the gate blocks before the crew runs. */
+export async function refuseFast(input: {
+  principal: AgentPrincipal;
+  capability: MuseCapability;
+  userMessage: string;
+  threadId?: string | null;
+  onEvent?: (event: CrewEvent) => void;
+}): Promise<AgentServiceResult> {
+  return runSafetyRefusal(input);
 }
 
 export { runCrew };

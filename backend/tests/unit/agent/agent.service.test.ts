@@ -19,8 +19,6 @@ const mockOrchestrate = orchestrate as jest.MockedFunction<typeof orchestrate>;
 
 const principal: AgentPrincipal = {
   userId: 'user-42',
-  agentKeyId: 'ak-42',
-  scopes: ['read', 'trade'],
 };
 
 const dryPolicy: PolicyDecision = {

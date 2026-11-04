@@ -74,7 +74,7 @@ const mockCreateMany = (prisma as unknown as { agentTranscriptEntry: { createMan
   .agentTranscriptEntry.createMany;
 const mockFileLog = writeTranscriptLine as jest.Mock;
 
-const principal: AgentPrincipal = { userId: 'user-corr', agentKeyId: 'ak-corr', scopes: ['read'] };
+const principal: AgentPrincipal = { userId: 'user-corr' };
 const policy: PolicyDecision = { kind: 'DRY_RUN', reasons: ['default'] };
 
 const portfolio: PortfolioContext = {
@@ -101,7 +101,6 @@ const portfolio: PortfolioContext = {
 interface CapturedRow {
   actionId: string;
   userId: string;
-  agentKeyId: string | null;
   capability: string | null;
   mode: string | null;
   seq: number;
@@ -186,7 +185,6 @@ describe('transcript correlation', () => {
     for (const row of rows) {
       expect(row.actionId).toBe('action-corr-1');
       expect(row.userId).toBe('user-corr');
-      expect(row.agentKeyId).toBe('ak-corr');
       expect(row.capability).toBe('plan');
       expect(row.mode).toBe('fast');
     }

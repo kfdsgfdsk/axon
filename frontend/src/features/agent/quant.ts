@@ -32,6 +32,43 @@ export interface QuantPattern {
   bullish: boolean | null;
 }
 
+/* ---------------- portion colors ----------------
+ * Every annotated portion of the chart gets its own distinct color so the
+ * regions, level lines, badges, and pattern cards stay visually linked.
+ * Semantic hint survives (bullish reads green-ish, bearish red-ish), but no
+ * two pattern kinds ever share a color. */
+
+export const PATTERN_COLORS: Record<PatternKind, string> = {
+  higher_lows: '#3ddc84', // green — bullish structure
+  lower_highs: '#ff5252', // red — bearish structure
+  support: '#4fd8e8', // cyan — floor
+  resistance: '#ff9e4f', // orange — ceiling
+  breakout: '#a3e635', // lime — upside expansion
+  breakdown: '#f472b6', // pink — downside expansion
+  compression: '#b388ff', // violet — coil
+  drawdown: '#e8b400', // gold — slide
+  volume_spike: '#7cc4ff', // blue — participation
+  allocation_drift: '#94a3b8', // slate — book mix
+};
+
+/** Distinct color for one annotated portion. Stable for kind + index. */
+export function calloutColor(
+  callout: Pick<ChartCallout, 'kind'>,
+  index: number,
+): string {
+  if (PATTERN_COLORS[callout.kind]) return PATTERN_COLORS[callout.kind];
+  const kinds = Object.keys(PATTERN_COLORS) as PatternKind[];
+  return PATTERN_COLORS[kinds[Math.abs(index) % kinds.length]] || '#7cc4ff';
+}
+
+/** "#rrggbb" → "r,g,b" for rgba() compositing in SVG. */
+export function hexToRgbTriplet(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || '').trim());
+  if (!m) return '124,196,255';
+  const v = parseInt(m[1], 16);
+  return `${(v >> 16) & 255},${(v >> 8) & 255},${v & 255}`;
+}
+
 export interface QuantBrief {
   asset: string;
   symbol: string;
@@ -48,7 +85,99 @@ export interface QuantBrief {
 
 /* ---------------- triggers ---------------- */
 
-const QUANT_RE = /\b(chart|pattern|break ?outs?|break ?downs?|support|resistance|volume|allocat\w*|drawdown|trend|momentum|technicals?|quant|higher.?lows?|lower.?highs?|accumulat\w*|distribut\w*|volatil\w*|overbought|oversold|equity curve|portfolio mix)\b/i;
+const QUANT_RE = /\b(chart|pattern|break ?outs?|break ?downs?|support|resistance|volume|allocat\w*|drawdown|trend|momentum|technicals?|quant|higher.?lows?|lower.?highs?|accumulat\w*|distribut\w*|volatil\w*|overbought|oversold|analy[sz]e|analy[st]ic\w*|levels?|price action|equity curve|portfolio mix)\b/i;
+
+/* Typo-tolerant intent: mirrors backend/src/modules/agent/intent.ts (the
+ * frontend ships its own bundle, so the ~40 lines are ported, not imported).
+ * A word counts as chart intent when it IS a stem or a small typo away
+ * ("sharts"→chart, "analtics"→analytics, "chrat"→chart). Words under 5
+ * chars match exactly only — "chat" must never hit "chart". */
+
+function osaDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  const n = a.length;
+  const m = b.length;
+  if (n === 0) return m;
+  if (m === 0) return n;
+  const d: number[][] = Array.from({ length: n + 1 }, (_, i) =>
+    Array.from({ length: m + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return d[n][m];
+}
+
+function quantWords(text: string): string[] {
+  return (text || '')
+    .toLowerCase()
+    .split(/[^a-z0-9']+/)
+    .map((w) => w.replace(/^'+|'$/g, ''))
+    .filter((w) => w.length >= 2 && /[a-z]/.test(w));
+}
+
+/**
+ * Intent stems with per-stem typo budgets. Default: 5–6 chars → 1 typo,
+ * 7+ chars → 2 typos. Three stems are capped at 1 because their
+ * distance-2 neighbors are ordinary words: support~suppose,
+ * allocation~location, drawdown~dropdown.
+ */
+const QUANT_FUZZY_STEMS: Array<{ stem: string; max: number }> = [
+  { stem: 'chart', max: 1 },
+  { stem: 'pattern', max: 2 },
+  { stem: 'breakout', max: 2 },
+  { stem: 'breakdown', max: 2 },
+  { stem: 'support', max: 1 },
+  { stem: 'resistance', max: 2 },
+  { stem: 'volume', max: 1 },
+  { stem: 'allocation', max: 1 },
+  { stem: 'drawdown', max: 1 },
+  { stem: 'trend', max: 1 },
+  { stem: 'momentum', max: 2 },
+  { stem: 'technical', max: 2 },
+  { stem: 'analysis', max: 2 },
+  { stem: 'analytics', max: 2 },
+  { stem: 'analytic', max: 2 },
+  { stem: 'analyze', max: 1 },
+  { stem: 'analyse', max: 1 },
+  { stem: 'volatility', max: 2 },
+  { stem: 'overbought', max: 2 },
+  { stem: 'oversold', max: 2 },
+  { stem: 'level', max: 1 },
+  { stem: 'quant', max: 1 },
+  { stem: 'accumulation', max: 2 },
+  { stem: 'distribution', max: 2 },
+];
+
+function fuzzyStemHit(word: string, stem: string, max: number): boolean {
+  if (word === stem) return true;
+  if (word.length < 5 || stem.length < 5) return false;
+  if (Math.abs(word.length - stem.length) > 2) return false;
+  const budget = Math.min(max, word.length <= 6 ? 1 : 2);
+  return osaDistance(word, stem) <= budget;
+}
+
+function fuzzyQuantHit(message: string): boolean {
+  const words = quantWords(message);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    // "price action" is chart language even though neither word alone is.
+    if (w === 'price' && i + 1 < words.length && fuzzyStemHit(words[i + 1], 'action', 1)) {
+      return true;
+    }
+    if (w.length < 5) continue;
+    for (const { stem, max } of QUANT_FUZZY_STEMS) {
+      if (fuzzyStemHit(w, stem, max)) return true;
+    }
+  }
+  return false;
+}
 
 const SYM_MAP: Record<string, string> = {
   BTC: 'bitcoin', ETH: 'ethereum', SOL: 'solana', TRX: 'tron',
@@ -60,7 +189,9 @@ const SYM_MAP: Record<string, string> = {
 };
 
 export function wantsQuant(message: string): boolean {
-  return QUANT_RE.test(message);
+  if (QUANT_RE.test(message)) return true;
+  // Intent, not keywords: typos and misspellings still chart.
+  return fuzzyQuantHit(message);
 }
 
 export interface RouterCatalogEntry {

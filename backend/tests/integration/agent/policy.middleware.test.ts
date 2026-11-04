@@ -50,8 +50,6 @@ function runMiddleware(
 describe('policyMiddleware integration', () => {
   const principal: AgentPrincipal = {
     userId: 'u-int',
-    agentKeyId: 'ak-int',
-    scopes: ['read', 'trade'],
   };
 
   afterEach(() => {
@@ -76,13 +74,14 @@ describe('policyMiddleware integration', () => {
     expect(err).toBeInstanceOf(ForbiddenError);
   });
 
-  test('strategy without trade scope → DENY / ForbiddenError', async () => {
+  test('strategy works for JWT users (no scope gate; dry-run by default)', async () => {
     const req = mockReq({
-      agentPrincipal: { ...principal, scopes: ['read'] },
+      agentPrincipal: principal,
       body: { dryRun: true },
     });
-    const { err } = await runMiddleware('strategy', req);
-    expect(err).toBeInstanceOf(ForbiddenError);
+    const { err, req: out } = await runMiddleware('strategy', req);
+    expect(err).toBeUndefined();
+    expect(out.agentPolicy?.kind).toBe('DRY_RUN');
   });
 
   test('kill switch → ForbiddenError', async () => {

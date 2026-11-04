@@ -17,6 +17,15 @@ export function AuthPage() {
   const [need2fa, setNeed2fa] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
 
+  // Switching tabs keeps the email but never carries the password (or a
+  // stale 2FA code) across — each form starts with a blank secret.
+  const switchTab = (next: 'login' | 'register') => {
+    setTab(next);
+    setPassword('');
+    setCode('');
+    setNeed2fa(false);
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -100,9 +109,9 @@ export function AuthPage() {
             </Button>
             <div className="auth-swap">
               {tab === 'login' ? (
-                <>New here? <button type="button" onClick={() => setTab('register')}>Create an account</button></>
+                <>New here? <button type="button" onClick={() => switchTab('register')}>Create an account</button></>
               ) : (
-                <>Have an account? <button type="button" onClick={() => setTab('login')}>Sign in</button></>
+                <>Have an account? <button type="button" onClick={() => switchTab('login')}>Sign in</button></>
               )}
             </div>
           </form>

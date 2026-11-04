@@ -83,7 +83,6 @@ const SECRET_KEY_PATTERN =
 
 /** High-confidence secret shapes inside free text. */
 const VALUE_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
-  { pattern: /\bak_[A-Za-z0-9_-]{4,}/g, replacement: '[REDACTED_AGENT_KEY]' },
   { pattern: /Bearer\s+[A-Za-z0-9._~+/-]+=*/g, replacement: 'Bearer [REDACTED]' },
   { pattern: /(?:sk-ant|sk-proj|sk-)[A-Za-z0-9_-]{8,}/g, replacement: '[REDACTED_API_KEY]' },
   {

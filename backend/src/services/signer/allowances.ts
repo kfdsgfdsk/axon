@@ -15,7 +15,9 @@
  *
  * Safety: best-effort per job (log + continue) — a failed top-up never
  * blocks signer startup; the affected swaps fail closed until an operator
- * tops up. Keys are wiped after each network batch.
+ * tops up. A pre-flight native-balance check skips unfunded networks with
+ * one actionable line instead of N INSUFFICIENT_FUNDS tx blobs. Keys are
+ * wiped after each network batch.
  */
 
 import { ethers } from 'ethers';
@@ -159,6 +161,27 @@ export function needsTopup(current: bigint, cap: bigint): boolean {
   return current < cap;
 }
 
+/** True for "hot wallet cannot pay gas" failures (nothing to retry). */
+export function isUnfundedError(err: any): boolean {
+  if (!err) return false;
+  if (err?.code === 'INSUFFICIENT_FUNDS') return true;
+  return /insufficient funds/i.test(String(err?.message || err));
+}
+
+/**
+ * Ethers embeds the full signed tx + info blob in err.message
+ * (`... (transaction="0x...", info={...}, code=..., version=...)`). Logs only
+ * need the human reason — prefer ethers' shortMessage, else cut the blob.
+ */
+export function shortTopupError(err: any, maxLen = 200): string {
+  const raw = String(err?.shortMessage || err?.message || err || 'unknown');
+  const cut = raw.indexOf(' (transaction=');
+  const head = (cut >= 0 ? raw.slice(0, cut) : raw)
+    .replace(/\s+/g, ' ')
+    .trim();
+  return head.length > maxLen ? head.slice(0, maxLen) + '…' : head;
+}
+
 export interface TopupDeps {
   getAllowance(): Promise<bigint>;
   approve(cap: bigint): Promise<string>;
@@ -200,17 +223,52 @@ function evmDeps(job: AllowanceJob, key: Uint8Array, networkId: string): TopupDe
   };
 }
 
-function tronDeps(job: AllowanceJob, key: Uint8Array): TopupDeps {
+function tronClient(): any {
   const host = (config.rpc.tronFullHost || '').trim();
   if (!host) throw new Error('TRON_FULL_HOST not set');
-  const tronWeb: any = new TronWeb({
+  return new TronWeb({
     fullHost: host,
     headers: config.rpc.tronApiKey
       ? { 'TRON-PRO-API-KEY': config.rpc.tronApiKey }
       : undefined,
   });
+}
+
+function tronHotAddress(key: Uint8Array): { tronWeb: any; hot: string } {
+  const tronWeb: any = tronClient();
+  const hot: string = tronWeb.address.fromPrivateKey(
+    Buffer.from(key).toString('hex')
+  );
+  return { tronWeb, hot };
+}
+
+/** Hot-wallet address for the pre-flight gas check (no signing). */
+export function hotAddressFor(
+  network: { type: string },
+  key: Uint8Array
+): string {
+  if (network.type === 'tron') return tronHotAddress(key).hot;
+  return new ethers.Wallet(Buffer.from(key).toString('hex')).address;
+}
+
+/** Native balance (wei / SUN) for the pre-flight gas check. */
+export async function nativeBalanceFor(
+  network: { type: string },
+  networkId: string,
+  key: Uint8Array,
+  hot: string
+): Promise<bigint> {
+  if (network.type === 'tron') {
+    const { tronWeb } = tronHotAddress(key);
+    return BigInt(await tronWeb.trx.getBalance(hot));
+  }
+  const provider = getEvmProvider(networkId);
+  return BigInt(await provider.getBalance(hot));
+}
+
+function tronDeps(job: AllowanceJob, key: Uint8Array): TopupDeps {
+  const { tronWeb, hot } = tronHotAddress(key);
   const hex = Buffer.from(key).toString('hex');
-  const hot: string = tronWeb.address.fromPrivateKey(hex);
   return {
     getAllowance: async () => {
       const res: any =
@@ -254,6 +312,8 @@ export interface AllowanceReport {
   checked: number;
   topped: number;
   failed: string[];
+  /** Jobs skipped without attempting a broadcast (unfunded wallet / unreadable balance). */
+  skipped: string[];
 }
 
 /**
@@ -261,7 +321,7 @@ export interface AllowanceReport {
  * per-job failures are collected, never thrown. Runs at signer boot.
  */
 export async function ensureRouterAllowances(): Promise<AllowanceReport> {
-  const out: AllowanceReport = { checked: 0, topped: 0, failed: [] };
+  const out: AllowanceReport = { checked: 0, topped: 0, failed: [], skipped: [] };
   if ((process.env.SIGNER_ALLOWANCES_ON_BOOT || 'true').toLowerCase() !== 'true') {
     logger.info('Router allowances on boot disabled (SIGNER_ALLOWANCES_ON_BOOT!=true)');
     return out;
@@ -302,6 +362,34 @@ export async function ensureRouterAllowances(): Promise<AllowanceReport> {
     try {
       const network = getNetwork(networkId);
       key = deriveHotPrivateKey(mnemonic, network).privateKey;
+      // Pre-flight: a hot wallet with no native gas cannot broadcast
+      // anything. Skip the whole batch with ONE actionable line instead of
+      // one INSUFFICIENT_FUNDS tx blob per job.
+      let hot = '';
+      try {
+        hot = hotAddressFor(network, key);
+        const native = await nativeBalanceFor(network, networkId, key, hot);
+        if (native === 0n) {
+          for (const job of netJobs) {
+            out.skipped.push(`${job.tokenId}→${job.routerName}`);
+          }
+          logger.warn(
+            'allowances: hot wallet has no native gas — skipping top-ups until funded',
+            { networkId, hot, jobs: netJobs.length }
+          );
+          continue;
+        }
+      } catch (err: any) {
+        for (const job of netJobs) {
+          out.skipped.push(`${job.tokenId}→${job.routerName}`);
+        }
+        logger.warn('allowances: cannot read hot wallet balance — skipping batch', {
+          networkId,
+          ...(hot ? { hot } : {}),
+          error: shortTopupError(err),
+        });
+        continue;
+      }
       for (const job of netJobs) {
         out.checked += 1;
         try {
@@ -319,9 +407,18 @@ export async function ensureRouterAllowances(): Promise<AllowanceReport> {
             });
           }
         } catch (err: any) {
-          const msg = `${job.tokenId}→${job.routerName}: ${err?.message || err}`;
+          const short = shortTopupError(err);
+          const msg = `${job.tokenId}→${job.routerName}: ${short}`;
           out.failed.push(msg);
-          logger.warn('allowance top-up failed', { job: msg });
+          if (isUnfundedError(err)) {
+            // Pre-flight normally catches this; a mid-batch drain lands here.
+            logger.info('allowance top-up skipped — hot wallet out of gas', {
+              job: `${job.tokenId}→${job.routerName}`,
+              error: short,
+            });
+          } else {
+            logger.warn('allowance top-up failed', { job: msg });
+          }
         }
       }
     } catch (err: any) {
@@ -338,6 +435,7 @@ export async function ensureRouterAllowances(): Promise<AllowanceReport> {
     checked: out.checked,
     topped: out.topped,
     failed: out.failed.length,
+    skipped: out.skipped.length,
   });
   return out;
 }

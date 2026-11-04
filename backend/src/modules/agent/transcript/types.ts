@@ -2,16 +2,15 @@
  * Transcript entry shapes for the Muse crew's full-fidelity decision log.
  *
  * Every entry carries the run correlation fields (actionId + userId +
- * agentKeyId + capability + mode) so one ordered query rebuilds the whole run.
+ * capability + mode) so one ordered query rebuilds the whole run.
  * Payloads are redacted and size-capped by redact.ts before they are stored.
  */
 
-export type TranscriptKind = 'ROLE_TURN' | 'TOOL_CALL' | 'DECISION_TRACE';
+export type TranscriptKind = 'ROLE_TURN' | 'TOOL_CALL' | 'DECISION_TRACE' | 'PROPOSAL_SNAPSHOT';
 
 export interface TranscriptCorrelation {
   actionId: string;
   userId: string;
-  agentKeyId?: string;
   capability?: string;
   mode?: string;
 }
@@ -89,7 +88,17 @@ export interface DecisionTracePayload {
   verificationOk: boolean;
 }
 
-export type TranscriptPayload = RoleTurnPayload | ToolCallPayload | DecisionTracePayload;
+/** Full verified proposal, persisted server-side as the execution source of truth. */
+export interface ProposalSnapshotPayload {
+  proposalId: string;
+  proposal: unknown;
+}
+
+export type TranscriptPayload =
+  | RoleTurnPayload
+  | ToolCallPayload
+  | DecisionTracePayload
+  | ProposalSnapshotPayload;
 
 export interface TranscriptEntryInput extends TranscriptCorrelation {
   kind: TranscriptKind;

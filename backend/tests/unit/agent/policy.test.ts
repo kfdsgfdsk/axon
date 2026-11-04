@@ -31,10 +31,8 @@ import config from '../../../src/config';
 import { evaluatePolicy } from '../../../src/modules/agent/policy.middleware';
 import type { AgentPrincipal, MuseCapability } from '../../../src/modules/agent/types';
 
-const basePrincipal = (scopes: AgentPrincipal['scopes'] = ['read', 'trade']): AgentPrincipal => ({
+const basePrincipal = (): AgentPrincipal => ({
   userId: 'user-1',
-  agentKeyId: 'akey-1',
-  scopes,
   email: 't@example.com',
 });
 
@@ -52,10 +50,10 @@ describe('evaluatePolicy — kill switch & feature flags', () => {
     });
   });
 
-  test('kill switch forces DENY regardless of scopes', () => {
+  test('kill switch forces DENY', () => {
     setAgentCfg({ killSwitch: true });
     const d = evaluatePolicy({
-      principal: basePrincipal(['trade']),
+      principal: basePrincipal(),
       capability: 'plan',
       requestedDryRun: false,
       liveRequested: true,
@@ -77,7 +75,7 @@ describe('evaluatePolicy — kill switch & feature flags', () => {
   });
 });
 
-describe('evaluatePolicy — scopes by capability', () => {
+describe('evaluatePolicy — every capability dry-runs by default', () => {
   afterEach(() => {
     setAgentCfg({
       enabled: true,
@@ -87,38 +85,16 @@ describe('evaluatePolicy — scopes by capability', () => {
     });
   });
 
-  test('strategy requires trade scope → DENY without it', () => {
-    const d = evaluatePolicy({
-      principal: basePrincipal(['read']),
-      capability: 'strategy',
-      requestedDryRun: true,
-      liveRequested: false,
-    });
-    expect(d.kind).toBe('DENY');
-    expect(d.reasons.join(' ')).toMatch(/trade scope/i);
-  });
-
-  test('read-only capabilities allowed with only read scope', () => {
-    for (const cap of ['reactive', 'copilot', 'plan', 'critique'] as MuseCapability[]) {
+  test('all capabilities (including strategy) DRY_RUN for JWT users', () => {
+    for (const cap of ['reactive', 'copilot', 'plan', 'strategy', 'critique'] as MuseCapability[]) {
       const d = evaluatePolicy({
-        principal: basePrincipal(['read']),
+        principal: basePrincipal(),
         capability: cap,
         requestedDryRun: true,
         liveRequested: false,
       });
       expect(d.kind).toBe('DRY_RUN');
     }
-  });
-
-  test('principal with zero scopes → DENY', () => {
-    const d = evaluatePolicy({
-      principal: basePrincipal([]),
-      capability: 'reactive',
-      requestedDryRun: true,
-      liveRequested: false,
-    });
-    expect(d.kind).toBe('DENY');
-    expect(d.reasons.join(' ')).toMatch(/no valid scopes/i);
   });
 });
 
@@ -136,7 +112,7 @@ describe('evaluatePolicy — dry-run default & live path', () => {
 
   test('default path is DRY_RUN when dryRunDefault=true', () => {
     const d = evaluatePolicy({
-      principal: basePrincipal(['trade']),
+      principal: basePrincipal(),
       capability: 'plan',
       requestedDryRun: true,
       liveRequested: false,
@@ -148,7 +124,7 @@ describe('evaluatePolicy — dry-run default & live path', () => {
   test('live requested but allowLiveExecution=false → stays DRY_RUN', () => {
     setAgentCfg({ dryRunDefault: false, allowLiveExecution: false });
     const d = evaluatePolicy({
-      principal: basePrincipal(['trade']),
+      principal: basePrincipal(),
       capability: 'strategy',
       requestedDryRun: false,
       liveRequested: true,
@@ -157,10 +133,10 @@ describe('evaluatePolicy — dry-run default & live path', () => {
     expect(d.reasons.join(' ')).toMatch(/allowLiveExecution/i);
   });
 
-  test('ALLOW only when live requested + trade scope + allowLiveExecution', () => {
+  test('ALLOW only when live requested + allowLiveExecution', () => {
     setAgentCfg({ dryRunDefault: false, allowLiveExecution: true });
     const d = evaluatePolicy({
-      principal: basePrincipal(['trade']),
+      principal: basePrincipal(),
       capability: 'strategy',
       requestedDryRun: false,
       liveRequested: true,
@@ -170,26 +146,13 @@ describe('evaluatePolicy — dry-run default & live path', () => {
     expect(d.constraints?.maxSlippageBps).toBe(100);
     expect(d.constraints?.requireIdempotencyKey).toBe(true);
   });
-
-  test('live requested without trade scope → DENY', () => {
-    setAgentCfg({ dryRunDefault: false, allowLiveExecution: true });
-    const d = evaluatePolicy({
-      principal: basePrincipal(['read']),
-      capability: 'plan',
-      requestedDryRun: false,
-      liveRequested: true,
-    });
-    // plan only needs read for dry, but live still requires trade
-    expect(d.kind).toBe('DENY');
-    expect(d.reasons.join(' ')).toMatch(/trade scope/i);
-  });
 });
 
 describe('evaluatePolicy — Muse never moves money contract', () => {
   test('even ALLOW decision never grants withdraw capability via policy', () => {
     setAgentCfg({ dryRunDefault: false, allowLiveExecution: true });
     const d = evaluatePolicy({
-      principal: basePrincipal(['trade']),
+      principal: basePrincipal(),
       capability: 'strategy',
       requestedDryRun: false,
       liveRequested: true,

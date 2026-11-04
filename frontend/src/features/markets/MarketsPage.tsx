@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useHistory, useTicks } from '../../lib/data';
 import {
   clientMarkOf, ensureClientSymbols, primeClientMarks, reconnectClientFeed,
@@ -12,13 +12,22 @@ import { fmtPct, fmtPriceUsd } from '../../lib/format';
 import { PriceChart } from '../../ui/charts';
 import { MarketLogo } from '../../ui/chains';
 import { Badge, Button, Card, Segmented, Stat } from '../../ui/primitives';
+import { AskDesk, usePublishDockContext } from '../../ui/AskDesk';
+import type { AskSuggestion } from '../../ui/AskDesk';
 import type { TickView } from '../../lib/data';
 import { IconAgent, IconBolt } from '../../ui/icons';
 
 export function MarketsPage() {
   const { ticks, loading } = useTicks();
   const { assets, loading: catalogLoading } = useSupportedAssets();
-  const [sel, setSel] = React.useState('ethereum');
+  // Deep link from Overview (holdings / open risk): ?asset=<catalog id> opens
+  // that asset's chart directly.
+  const [params] = useSearchParams();
+  const requested = params.get('asset');
+  const [sel, setSel] = React.useState(requested || 'ethereum');
+  React.useEffect(() => {
+    if (requested) setSel(requested);
+  }, [requested]);
   const [range, setRange] = React.useState<ChartRangeKey>('1h');
   const [query, setQuery] = React.useState('');
   const { points, spec } = useHistory(sel, range);
@@ -152,6 +161,13 @@ export function MarketsPage() {
     sessionStorage.setItem('axon.agentDraft', `Break down ${cur?.sym || sel}: trend, momentum and whether my book should care.`);
     sessionStorage.setItem('axon.agentAuto', '1');
   };
+
+  // First chip carries the user's actual selection (asset, range, last mark).
+  const firstSuggestion: AskSuggestion = {
+    label: 'Why is it moving?',
+    prompt: `Why is ${cur?.sym || sel} moving right now (last ${range}, now ${fmtPriceUsd(cur?.price)} ${fmtPct(rangeChg)} on the range)? Read the chart and tell me if my book should care.`,
+  };
+  usePublishDockContext(firstSuggestion);
 
   return (
     <div className="grid-12">
@@ -287,6 +303,15 @@ export function MarketsPage() {
             <Button size="sm" onClick={watch} loading={watching} icon={<IconBolt />}>{watching ? `Pinning ${cur?.sym || 'mark'}…` : `Keep ${cur?.sym || 'mark'} warm`}</Button>
             <Link to="/agent" onClick={askCrew}><Button size="sm" variant="signal" icon={<IconAgent />}>Brief me on {cur?.sym || 'this'}</Button></Link>
             <Link to="/trade"><Button size="sm" variant="ghost" arrow>Trade {cur?.sym || 'it'}</Button></Link>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <AskDesk
+              suggestions={[
+                firstSuggestion,
+                { label: 'Key levels', prompt: `Give me the key support and resistance levels for ${cur?.sym || sel} with what flips the read.` },
+                { label: 'Momentum read', prompt: `Quick momentum read on ${cur?.sym || sel}: trend, volatility, and whether to act or wait.` },
+              ]}
+            />
           </div>
         </Card>
 

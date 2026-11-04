@@ -84,7 +84,11 @@ const BINANCE_SYMBOL: Record<string, string> = {
   bitcoin: 'BTCUSDT',
 };
 
-/** Default same-chain stable token ids for emergency exits */
+/**
+ * Same-chain stable token ids per network (subset of the settlement matrix).
+ * Prefer the settlement matrix (services/trading/settlement.ts) for exit-leg
+ * defaults — this map cannot express the cross-chain bitcoin/tron legs.
+ */
 export const DEFAULT_STABLE_BY_NETWORK: Record<string, string> = {
   ethereum: 'usdc-ethereum',
   sepolia: 'usdc-sepolia',
@@ -486,8 +490,10 @@ export async function getMidWithMeta(opts: {
     if (!meta.stale) {
       // Keep hub warm from cache hits
       publishPrice(key, cached.price, cached.source as HubSource);
+      return meta;
     }
-    return meta;
+    // Stale cache (TTL outlives the 3s settlement bar): fall through and
+    // refetch live. The stale entry stays as the failure fallback below.
   }
 
   const binanceSym = resolveBinanceSymbol(enriched);
@@ -525,6 +531,7 @@ export async function getMidWithMeta(opts: {
 
   if (tasks.length === 0) {
     // No mapping for this token → fail closed (null). Do not invent a native price.
+    if (cached) return toMeta(cached, true);
     if (hub) {
       return {
         price: hub.price,
@@ -629,6 +636,7 @@ export async function getPriceBatch(
   if (items.length === 0) return out;
 
   const needFetch: PriceBatchItem[] = [];
+  const staleFallback = new Map<string, CacheEntry>();
   const now = Date.now();
 
   await readSharedMarks(items.map((item) => item.key || resolveKey(item)));
@@ -662,9 +670,14 @@ export async function getPriceBatch(
     const cached = await readCache(key);
     if (cached) {
       const meta = toMeta(cached);
-      out.set(key, meta);
       if (!meta.stale) {
+        out.set(key, meta);
         publishPrice(key, cached.price, cached.source as HubSource);
+      } else {
+        // Stale cache (TTL outlives the 3s settlement bar): refetch live;
+        // the stale entry stays as the failure fallback in the loop below.
+        staleFallback.set(key, cached);
+        needFetch.push({ ...item, key });
       }
     } else {
       needFetch.push({ ...item, key });
@@ -762,9 +775,9 @@ export async function getPriceBatch(
       });
       continue;
     }
-    const expired = memoryCache.get(key);
-    if (expired) {
-      out.set(key, toMeta(expired, true));
+    const fallback = staleFallback.get(key) ?? memoryCache.get(key);
+    if (fallback) {
+      out.set(key, toMeta(fallback, true));
     }
   }
 

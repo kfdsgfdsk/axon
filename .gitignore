@@ -6,3 +6,8 @@ logs/
 *.log
 coverage/
 .DS_Store
+# Local verification artifacts (screenshots, recordings, MCP tool state)
+/*.png
+recordings/
+.playwright-mcp/
+.mcp.json

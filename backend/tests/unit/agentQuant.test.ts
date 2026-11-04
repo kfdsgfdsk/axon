@@ -1,7 +1,7 @@
 import {
-  allocationFlags, assetFromMessage, buildQuantBrief, wantsQuant,
-} from '../../frontend/src/features/agent/quant';
-import type { PricePoint } from '../../frontend/src/lib/types';
+  allocationFlags, assetFromMessage, buildQuantBrief, calloutColor, wantsQuant,
+} from '../../../frontend/src/features/agent/quant';
+import type { PricePoint } from '../../../frontend/src/lib/types';
 
 function series(prices: number[], t0 = 1_700_000_000_000, step = 300_000, vol?: number[]): PricePoint[] {
   return prices.map((p, i) => ({ t: t0 + i * step, p, ...(vol ? { v: vol[i] } : {}) }));
@@ -19,6 +19,39 @@ describe('quant triggers', () => {
     expect(assetFromMessage('break down SOL please', 'ethereum')).toBe('solana');
     expect(assetFromMessage('BTC chart look?', 'ethereum')).toBe('bitcoin');
     expect(assetFromMessage('the chart looks strong', 'solana')).toBe('solana');
+  });
+
+  test('chart intent survives typos and misspellings', () => {
+    // The reported miss: "sol sharts analtics?" showed no chart.
+    expect(wantsQuant('sol sharts analtics?')).toBe(true);
+    expect(wantsQuant('SOL chrat analysis please')).toBe(true);
+    expect(wantsQuant('btc supprot and resistence?')).toBe(true);
+    expect(wantsQuant('volitility on sol right now?')).toBe(true);
+    expect(wantsQuant('eth momentumm check')).toBe(true);
+    // …and the asset still resolves under the same typos.
+    expect(assetFromMessage('sol sharts analtics?', 'ethereum')).toBe('solana');
+  });
+
+  test('chart intent does not overtrigger on chat or plain goals', () => {
+    expect(wantsQuant('grow stables by 2% without leverage')).toBe(false);
+    expect(wantsQuant("let's chat about fees")).toBe(false);
+    expect(wantsQuant('what are the withdrawal fees?')).toBe(false);
+    expect(wantsQuant('character of the market today?')).toBe(false);
+  });
+});
+
+describe('quant chart colors', () => {
+  test('each pattern kind gets its own distinct color', () => {
+    const kinds = [
+      'higher_lows', 'support', 'resistance', 'breakout',
+      'breakdown', 'compression', 'drawdown', 'volume_spike',
+    ] as const;
+    const colors = kinds.map((kind, i) => calloutColor({ kind } as any, i));
+    expect(new Set(colors).size).toBe(colors.length);
+    // Stable: same kind + index always yields the same color.
+    expect(calloutColor({ kind: 'support' } as any, 3)).toBe(
+      calloutColor({ kind: 'support' } as any, 3)
+    );
   });
 });
 

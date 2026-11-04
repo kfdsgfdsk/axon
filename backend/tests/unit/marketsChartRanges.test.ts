@@ -1,5 +1,5 @@
-import { downsample, specForRange, RANGE_SPECS, rangeFromMinutes } from '../../frontend/src/lib/chartRanges';
-import { fmtPrice, fmtPriceUsd, priceDecimals } from '../../frontend/src/lib/format';
+import { downsample, specForRange, RANGE_SPECS, rangeFromMinutes } from '../../../frontend/src/lib/chartRanges';
+import { fmtPrice, fmtPriceUsd, priceDecimals } from '../../../frontend/src/lib/format';
 
 const INTERVAL_MIN: Record<string, number> = { '1m': 1, '5m': 5, '15m': 15, '1h': 60 };
 

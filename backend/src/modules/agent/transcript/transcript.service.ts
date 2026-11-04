@@ -29,7 +29,6 @@ const MAX_SEQ_KEYS = 10_000;
 interface QueuedRow {
   actionId: string;
   userId: string;
-  agentKeyId: string | null;
   capability: string | null;
   mode: string | null;
   seq: number;
@@ -126,7 +125,6 @@ export function logTranscript(input: TranscriptEntryInput): void {
     const row: QueuedRow = {
       actionId: input.actionId,
       userId: input.userId,
-      agentKeyId: input.agentKeyId ?? null,
       capability: input.capability ?? null,
       mode: input.mode ?? null,
       seq,
@@ -140,7 +138,6 @@ export function logTranscript(input: TranscriptEntryInput): void {
     writeTranscriptLine({
       actionId: row.actionId,
       userId: row.userId,
-      agentKeyId: row.agentKeyId,
       capability: row.capability,
       mode: row.mode,
       seq,

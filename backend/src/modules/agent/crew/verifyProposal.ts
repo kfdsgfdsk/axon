@@ -6,7 +6,8 @@
  *  - the from-asset is actually held (or is the native asset on that network)
  *  - the amount is positive and does not exceed available funds
  *  - the estimated notional is within the policy cap
- *  - the source asset's mark is fresh
+ *  - the source asset's mark is usable (settlement-fresh or fetched
+ *    within the analysis window; execution still re-checks fresh)
  *  - required network/token fields are present
  *  - cited evidence ids exist in this run
  *
@@ -47,6 +48,12 @@ export interface VerifyProposalInput {
   policy: PolicyDecision;
   maxNotionalUsd?: number;
   maxSlippageBps?: number;
+  /**
+   * Proposal-time mark freshness (ms). A source mark counts as a sizing base
+   * when settlement-fresh OR fetched within this window. Execution still
+   * re-checks the 3s settlement bar at placement. Defaults to 5 minutes.
+   */
+  markFreshMs?: number;
   /**
    * Order ids owned by the requesting principal (F14). When provided,
    * CANCEL_ORDER actions for other ids are dropped. When omitted (unit
@@ -94,6 +101,26 @@ function isStableToken(tokenId: string | null | undefined): boolean {
   // Token.isStable (admin-declared) is the only signal — no prefix guessing.
   // Unknown ids and cold cache count as non-stable (fail closed).
   return isStableTokenSync(tokenId);
+}
+
+/** Default proposal-time mark window (ms) when callers pass none. */
+export const DEFAULT_MARK_FRESH_MS = 300_000;
+
+/**
+ * A source mark is a usable sizing base when it is settlement-fresh, or when
+ * it carries a positive price fetched within the analysis window. Unknown
+ * fetch time, missing/zero price, or an age past the window fails closed.
+ */
+function markUsableForSizing(
+  source: PortfolioBalanceView,
+  markFreshMs: number
+): boolean {
+  if (source.markStale === false) return true;
+  const price = num(source.markUsd);
+  const at =
+    typeof source.markUpdatedAt === 'number' ? source.markUpdatedAt : NaN;
+  if (!(price > 0) || !Number.isFinite(at)) return false;
+  return Date.now() - at <= markFreshMs;
 }
 
 /**
@@ -194,8 +221,17 @@ export function verifyProposal(input: VerifyProposalInput): VerifyProposalResult
           );
         }
         // Selling a stablecoin needs no mark (amount is already USD-like).
-        // Selling anything else without a fresh mark would be blind sizing.
-        if (source.markStale !== false && !isStableToken(action.fromTokenId)) {
+        // Selling anything else without a usable mark would be blind sizing.
+        // The 3s settlement bar is for execution; a price fetched during this
+        // run (inside the analysis window) is a valid proposal base.
+        const windowMs =
+          input.markFreshMs && input.markFreshMs > 0
+            ? input.markFreshMs
+            : DEFAULT_MARK_FRESH_MS;
+        if (
+          !markUsableForSizing(source, windowMs) &&
+          !isStableToken(action.fromTokenId)
+        ) {
           actionProblems.push(
             `mark for ${source.asset} is stale or missing; refusing to size from it`
           );

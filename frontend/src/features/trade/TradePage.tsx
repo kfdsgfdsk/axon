@@ -5,12 +5,80 @@ import { demoQuery, useModeData } from '../../lib/data';
 import { useToast } from '../../lib/toast';
 import { fmtDateTime, fmtNum, fmtUsd, symbolOf } from '../../lib/format';
 import { Badge, Button, Card, Empty, Field, Skeleton, Tabs, statusTone } from '../../ui/primitives';
+import { AskDesk, usePublishDockContext } from '../../ui/AskDesk';
+import type { AskSuggestion } from '../../ui/AskDesk';
+import { BracketChart } from './BracketChart';
 import { IconShield } from '../../ui/icons';
 import { MarketLogo } from '../../ui/chains';
 import { AssetPicker, assetKeyOf, useTradeAssets } from './AssetPicker';
 import type { SupportedAsset } from '../../lib/binanceClient';
 import type { Order, Position } from '../../lib/types';
 import './trade.css';
+
+/* ---------------- SETTLEMENT ----------------
+ * Which stablecoin on which chain brackets/positions settle in.
+ * Fetched from GET /api/v1/trade/settlement (single source of truth);
+ * the fallback below mirrors the backend matrix for offline first paint.
+ */
+interface SettlementLeg { networkId: string; tokenId: string }
+
+const SETTLEMENT_FALLBACK: Record<string, SettlementLeg> = {
+  ethereum: { networkId: 'ethereum', tokenId: 'usdc-ethereum' },
+  arbitrum: { networkId: 'arbitrum', tokenId: 'usdc-arbitrum' },
+  optimism: { networkId: 'optimism', tokenId: 'usdc-optimism' },
+  base: { networkId: 'base', tokenId: 'usdc-base' },
+  polygon: { networkId: 'polygon', tokenId: 'usdc-polygon' },
+  bsc: { networkId: 'bsc', tokenId: 'usdt-bsc' },
+  avalanche: { networkId: 'avalanche', tokenId: 'usdc-avalanche' },
+  solana: { networkId: 'solana', tokenId: 'usdc-solana' },
+  bitcoin: { networkId: 'base', tokenId: 'usdc-base' },
+  tron: { networkId: 'base', tokenId: 'usdc-base' },
+};
+
+function useSettlement(): Record<string, SettlementLeg> {
+  const [table, setTable] = React.useState(SETTLEMENT_FALLBACK);
+  React.useEffect(() => {
+    api('/api/v1/trade/settlement').then((r: any) => {
+      const d = (r && typeof r === 'object' && 'data' in r ? r.data : r) as Record<string, SettlementLeg>;
+      if (d && typeof d === 'object') setTable({ ...SETTLEMENT_FALLBACK, ...d });
+    }).catch(() => {});
+  }, []);
+  return table;
+}
+
+/** Stable-only asset picker for the settlement leg, with default reset. */
+function SettlementField({
+  assets, value, onChange, onReset, isDefault, forSymbol,
+}: {
+  assets: SupportedAsset[];
+  value: string;
+  onChange: (asset: string) => void;
+  onReset: () => void;
+  isDefault: boolean;
+  forSymbol: string;
+}) {
+  const stables = React.useMemo(() => assets.filter((a) => a.stable), [assets]);
+  const entry = assets.find((a) => a.asset === value) || null;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <Field
+        label="Settles in"
+        hint={isDefault
+          ? `Default exit for ${forSymbol} — pick another stable to override.`
+          : 'Overridden — reset to use the default exit.'}
+      >
+        <AssetPicker assets={stables} value={value} loading={assets.length === 0} onChange={onChange} />
+      </Field>
+      {!isDefault && (
+        <div>
+          <Button size="sm" variant="ghost" onClick={onReset}>
+            Reset to default{entry ? ` — currently ${entry.symbol} · ${entry.networkId}` : ''}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* ---------------- SWAP ---------------- */
 function SwapPane() {
@@ -73,6 +141,14 @@ function SwapPane() {
 
   const ready = !!from && !!to && !loading;
 
+  // First chip carries the user's actual swap parameters; the dock borrows it
+  // as its first quick action while this pane is on screen.
+  const swapCtx: AskSuggestion | null = from && to ? {
+    label: 'Help me size this trade',
+    prompt: `Help me size a swap of ${amount || '?'} ${from.symbol} on ${from.networkId} into ${to.symbol} on ${to.networkId}: is the size sane for my book, and what would you change? Dry run only.`,
+  } : null;
+  usePublishDockContext(swapCtx);
+
   return (
     <div className="grid-12">
       <div className="span-7 stack" style={{ gap: 12 }}>
@@ -112,6 +188,15 @@ function SwapPane() {
             </Button>
           )}
         </div>
+        {from && to && swapCtx && (
+          <AskDesk
+            suggestions={[
+              swapCtx,
+              { label: 'Simulate this swap', prompt: `Simulate swapping ${amount || '?'} ${from.symbol} on ${from.networkId} into ${to.symbol} on ${to.networkId}: expected payout, worst case, and fee. Dry run only, do not execute.` },
+              { label: 'What could go wrong?', prompt: `I am about to swap ${amount || '?'} ${from.symbol} into ${to.symbol}. Red-team it: slippage, route, timing. Dry run only.` },
+            ]}
+          />
+        )}
       </div>
       <div className="span-5">
         <Card title="Quote" sub={quote ? 'FRESH' : 'EMPTY'}>
@@ -182,22 +267,41 @@ function BracketPane() {
   const { mode } = useMode();
   const { push } = useToast();
   const { assets, loading } = useTradeAssets();
+  const settlement = useSettlement();
   const [asset, setAsset] = React.useState('solana');
   const [amount, setAmount] = React.useState('20');
   const [tp, setTp] = React.useState('6');
   const [sl, setSl] = React.useState('3');
   const [trigger, setTrigger] = React.useState('');
+  const [settleOverride, setSettleOverride] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
 
   const entry = assets.find((a) => a.asset === asset) || null;
+  // Settlement leg: matrix default for the asset's network (cross-chain for
+  // BTC/TRX), overridable via the picker. Resets when the asset changes.
+  const settleDefault = entry ? settlement[entry.networkId] || null : null;
+  const settleDefaultKey = settleDefault ? assetKeyOf(settleDefault.networkId, settleDefault.tokenId) : '';
+  const settleKey = settleOverride ?? settleDefaultKey;
+  const settleAsset = assets.find((a) => a.asset === settleKey) || null;
+  const pickAsset = (a: string) => { setAsset(a); setSettleOverride(null); };
+
+  // First chip carries the user's actual bracket parameters — including the
+  // max-win / min-loss levels they set; the dock borrows it as its first
+  // quick action while this pane is on screen.
+  const bracketCtx: AskSuggestion | null = entry ? {
+    label: 'Check my max win / min loss',
+    prompt: `I set max win +${tp || '?'}% / min loss −${sl || '?'}% on ${amount || '?'} ${entry.symbol} (${entry.networkId}). Is this bracket sane for current volatility — what would you change and why? Dry run only — advise, do not arm.`,
+  } : null;
+  usePublishDockContext(bracketCtx);
 
   const submit = async () => {
-    if (!entry) return;
+    if (!entry || !settleAsset) return;
     setBusy(true);
     try {
       const body: any = {
         networkId: entry.networkId, tokenId: entry.tokenId, amount,
         takeProfitPct: Number(tp), stopLossPct: Number(sl),
+        toNetworkId: settleAsset.networkId, toTokenId: settleAsset.tokenId,
       };
       if (trigger) body.triggerPriceUsd = Number(trigger);
       // Same endpoint both rails — the flag locks mock balances in demo.
@@ -214,19 +318,55 @@ function BracketPane() {
     <div className="grid-12">
       <div className="span-7 stack" style={{ gap: 12 }}>
         <Field label={`Asset · ${assets.length} supported`}>
-          <AssetPicker assets={assets} value={asset} loading={loading} onChange={setAsset} />
+          <AssetPicker assets={assets} value={asset} loading={loading} onChange={pickAsset} />
         </Field>
         <Field label={`Amount${entry ? ` (${entry.symbol})` : ''}`}><input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" /></Field>
+        {entry && settleDefault && (
+          <SettlementField
+            assets={assets}
+            value={settleKey}
+            onChange={setSettleOverride}
+            onReset={() => setSettleOverride(null)}
+            isDefault={settleOverride == null}
+            forSymbol={entry.symbol}
+          />
+        )}
+        {entry && !settleDefault && (
+          <div className="mono" style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
+            No settlement route for {entry.networkId} — brackets cannot settle here yet.
+          </div>
+        )}
         <div className="field-row">
           <Field label="Take profit %"><input value={tp} onChange={(e) => setTp(e.target.value)} inputMode="decimal" /></Field>
           <Field label="Stop loss %"><input value={sl} onChange={(e) => setSl(e.target.value)} inputMode="decimal" /></Field>
         </div>
-        <Field label="Trigger price (USD, optional)" hint="Leave empty for immediate bracket">
+        <Field label="Exit at price (USD, optional)" hint="Above the current price it acts as take-profit; below it acts as stop-loss. Leave empty to arm from the percentages only.">
           <input value={trigger} onChange={(e) => setTrigger(e.target.value)} inputMode="decimal" placeholder="e.g. 220.00" />
         </Field>
-        <div><Button variant="signal" arrow onClick={submit} loading={busy} disabled={!amount || !entry}>{busy ? 'Arming…' : `Arm bracket · +${tp || '—'}% / −${sl || '—'}%`}</Button></div>
+        <div><Button variant="signal" arrow onClick={submit} loading={busy} disabled={!amount || !entry || !settleAsset}>{busy ? 'Arming…' : `Arm bracket · +${tp || '—'}% / −${sl || '—'}%`}</Button></div>
+        {entry && bracketCtx && (
+          <AskDesk
+            suggestions={[
+              bracketCtx,
+              { label: 'Balanced risk-reward', prompt: `Show me a balanced risk-reward bracket for ${entry.symbol}: what TP/SL split earns at least 2:1 without a reckless stop? Dry run only.` },
+              { label: 'Size from my equity', prompt: `Size a ${entry.symbol} bracket from my equity: how much can I risk for a +${tp || '—'}% / −${sl || '—'}% bracket without overexposing the book? Dry run only.` },
+            ]}
+          />
+        )}
       </div>
-      <div className="span-5">
+      <div className="span-5 stack" style={{ gap: 14 }}>
+        {entry && (
+          <Card title={`${entry.symbol} · Max Win / Min Loss`} sub="24H · DRAG TO SET">
+            <BracketChart
+              asset={entry.tokenId ?? (entry.networkId === 'solana-devnet' ? 'solana' : entry.networkId)}
+              symbol={entry.symbol}
+              tpPct={Number.isFinite(parseFloat(tp)) ? parseFloat(tp) : 6}
+              slPct={Number.isFinite(parseFloat(sl)) ? parseFloat(sl) : 3}
+              amount={Number.isFinite(parseFloat(amount)) ? parseFloat(amount) : 0}
+              onLevels={(t, s) => { setTp(String(t)); setSl(String(s)); }}
+            />
+          </Card>
+        )}
         <Card title="How brackets behave" sub="SERVER-SIDE">
           <div style={{ display: 'grid', gap: 10, fontSize: 13.5, color: 'var(--ink-dim)' }}>
             <div><strong style={{ color: 'var(--ink)' }}>TP leg</strong> — sells into strength at +{tp || '—'}%. Server-settled from hub marks, never your screen price.</div>
@@ -244,23 +384,76 @@ function PositionsPane() {
   const { mode } = useMode();
   const { push } = useToast();
   const { assets, loading: assetsLoading } = useTradeAssets();
+  const settlement = useSettlement();
   const list = useModeData<Position[]>('positions', (demo) => api('/api/v1/trade/positions', demoQuery(demo)), 12000);
+  // Live runs the agency book (long-only, 1x, stop-loss required, real swap
+  // legs); demo runs the price game (shorts + leverage on mock balances).
+  const isLive = mode !== 'demo';
   const [side, setSide] = React.useState<'BUY' | 'SELL'>('BUY');
   const [asset, setAsset] = React.useState('solana');
   const [margin, setMargin] = React.useState('500');
   const [lev, setLev] = React.useState('3');
   const [busy, setBusy] = React.useState(false);
+  // TP/SL levels for the chart below — armed with the position on both rails.
+  const [advTp, setAdvTp] = React.useState('6');
+  const [advSl, setAdvSl] = React.useState('3');
+  const [settleOverride, setSettleOverride] = React.useState<string | null>(null);
 
   const byKey = React.useMemo(() => new Map(assets.map((a) => [a.asset, a])), [assets]);
   const entry = byKey.get(asset) || null;
+  const settleDefault = entry ? settlement[entry.networkId] || null : null;
+  const settleDefaultKey = settleDefault ? assetKeyOf(settleDefault.networkId, settleDefault.tokenId) : '';
+  const settleKey = settleOverride ?? settleDefaultKey;
+  const settleAsset = assets.find((a) => a.asset === settleKey) || null;
+  const pickAsset = (a: string) => { setAsset(a); setSettleOverride(null); };
+
+  // Live contract: longs only at 1x. Switching rails resets the inputs so a
+  // demo short can never be submitted as a live order.
+  const effSide = isLive ? 'BUY' : side;
+  const effLev = isLive ? '1' : lev;
+  React.useEffect(() => {
+    if (isLive) { setSide('BUY'); setLev('1'); }
+  }, [isLive]);
+
+  // Leveraged size behind the chart's $ math — derived, never written back:
+  // dragging chart lines only moves the TP/SL levels below, the margin and
+  // leverage inputs stay exactly as the user typed them.
+  const marginNum = Number.isFinite(parseFloat(margin)) ? parseFloat(margin) : 0;
+  const levNum = Number.isFinite(parseFloat(effLev)) ? parseFloat(effLev) : 0;
+  const posNotional = marginNum > 0 && levNum > 0 ? marginNum * levNum : 0;
+
+  // First chip carries the user's actual position parameters; the dock borrows
+  // it as its first quick action while this pane is on screen.
+  const posCtx: AskSuggestion | null = entry ? {
+    label: 'Protect this position',
+    prompt: `I am about to open a ${effSide} on ${entry.symbol} with $${margin || '?'} margin at ${effLev || '?'}x, watching max win +${advTp || '?'}% / min loss −${advSl || '?'}%. How do I protect it: stop thinking, size check, invalidation? Dry run only — advise, do not open.`,
+  } : null;
+  usePublishDockContext(posCtx);
 
   const open = async () => {
-    if (!entry) return;
+    if (!entry || !settleAsset) return;
+    const tpNum = Number(advTp);
+    const slNum = Number(advSl);
+    if (isLive && (!Number.isFinite(slNum) || slNum <= 0)) {
+      push('err', 'Live positions require a stop-loss — set min loss above 0%.');
+      return;
+    }
     setBusy(true);
     try {
       // Same endpoint both rails — the flag margins mock stables in demo.
-      await api('/api/v1/trade/positions', { method: 'POST', csrf: true, idempotency: true, ...demoQuery(mode === 'demo'), body: { side, assetNetworkId: entry.networkId, assetTokenId: entry.tokenId, marginStable: margin, leverage: Number(lev) } });
-      push('ok', mode === 'demo' ? `Demo ${side} opened: $${margin} on ${entry.symbol} at ${lev}x` : 'Position opened');
+      const body: any = {
+        side: effSide,
+        assetNetworkId: entry.networkId,
+        assetTokenId: entry.tokenId,
+        marginStable: margin,
+        leverage: Number(effLev),
+        stableNetworkId: settleAsset.networkId,
+        stableTokenId: settleAsset.tokenId,
+      };
+      if (Number.isFinite(tpNum) && tpNum > 0) body.takeProfitPct = tpNum;
+      if (Number.isFinite(slNum) && slNum > 0) body.stopLossPct = slNum;
+      await api('/api/v1/trade/positions', { method: 'POST', csrf: true, idempotency: true, ...demoQuery(mode === 'demo'), body });
+      push('ok', mode === 'demo' ? `Demo ${effSide} opened: $${margin} on ${entry.symbol} at ${effLev}x` : 'Position opened');
       list.reload();
     } catch (e: any) { push('err', e?.message || 'Open failed'); }
     finally { setBusy(false); }
@@ -277,21 +470,77 @@ function PositionsPane() {
   return (
     <div className="grid-12">
       <div className="span-5 stack" style={{ gap: 12 }}>
-        <Field label="Direction">
+        <Field label="Direction" hint={isLive ? 'Live book is long-only (real swap legs, no borrow inventory).' : undefined}>
           <div className="seg" style={{ width: '100%' }}>
-            <button className={side === 'BUY' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setSide('BUY')}>BUY / LONG</button>
-            <button className={side === 'SELL' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setSide('SELL')}>SELL / SHORT</button>
+            <button className={effSide === 'BUY' ? 'on' : ''} style={{ flex: 1 }} onClick={() => setSide('BUY')}>BUY / LONG</button>
+            <button
+              className={effSide === 'SELL' ? 'on' : ''}
+              style={{ flex: 1 }}
+              onClick={() => setSide('SELL')}
+              disabled={isLive}
+              title={isLive ? 'Shorts are demo-only — live has no borrow inventory' : undefined}
+            >
+              SELL / SHORT
+            </button>
           </div>
         </Field>
         <Field label={`Asset · ${assets.length} supported`}>
-          <AssetPicker assets={assets} value={asset} loading={assetsLoading} onChange={setAsset} />
+          <AssetPicker assets={assets} value={asset} loading={assetsLoading} onChange={pickAsset} />
         </Field>
+        {entry && settleDefault && settleAsset && (
+          <SettlementField
+            assets={assets}
+            value={settleKey}
+            onChange={setSettleOverride}
+            onReset={() => setSettleOverride(null)}
+            isDefault={settleOverride == null}
+            forSymbol={entry.symbol}
+          />
+        )}
+        {entry && !settleDefault && (
+          <div className="mono" style={{ fontSize: 12, color: 'var(--ink-dim)' }}>
+            No settlement route for {entry.networkId} — positions cannot settle here yet.
+          </div>
+        )}
         <div className="field-row">
-          <Field label="Margin (USDT)"><input value={margin} onChange={(e) => setMargin(e.target.value)} inputMode="decimal" /></Field>
-          <Field label="Leverage (1–5x)"><input value={lev} onChange={(e) => setLev(e.target.value)} inputMode="decimal" /></Field>
+          <Field label={`Margin${settleAsset ? ` (${settleAsset.symbol} · ${settleAsset.networkId})` : ''}`}><input value={margin} onChange={(e) => setMargin(e.target.value)} inputMode="decimal" /></Field>
+          <Field
+            label={isLive ? 'Leverage (1x live)' : 'Leverage (1–5x)'}
+            hint={isLive ? 'Live positions run at 1x — wins come from the market, not leverage.' : undefined}
+          >
+            <input value={effLev} onChange={(e) => setLev(e.target.value)} inputMode="decimal" disabled={isLive} />
+          </Field>
         </div>
-        <div><Button variant={side === 'BUY' ? 'buy' : 'sell'} arrow onClick={open} loading={busy} disabled={!entry}>{busy ? 'Opening…' : `Open ${side === 'BUY' ? 'long' : 'short'} · $${margin || '—'} at ${lev || '—'}×`}</Button></div>
-        <div className="mono" style={{ fontSize: 11, color: 'var(--ink-faint)' }}>Beginner price-game positions · settled from server marks</div>
+        <div className="field-row">
+          <Field label="Take profit %" hint="Optional"><input value={advTp} onChange={(e) => setAdvTp(e.target.value)} inputMode="decimal" /></Field>
+          <Field label={`Stop loss %${isLive ? ' (required live)' : ''}`} hint={isLive ? 'Live positions require a stop-loss.' : 'Optional in demo'}><input value={advSl} onChange={(e) => setAdvSl(e.target.value)} inputMode="decimal" /></Field>
+        </div>
+        <div><Button variant={effSide === 'BUY' ? 'buy' : 'sell'} arrow onClick={open} loading={busy} disabled={!entry || !settleAsset}>{busy ? 'Opening…' : `Open ${effSide === 'BUY' ? 'long' : 'short'} · $${margin || '—'} at ${effLev || '—'}×`}</Button></div>
+        {entry && posCtx && (
+          <AskDesk
+            suggestions={[
+              posCtx,
+              { label: 'Is this leverage sane?', prompt: `Is ${effLev || '?'}x leverage on ${entry.symbol} with $${margin || '?'} margin sane for my book and current volatility? Dry run only.` },
+              { label: 'Reasonable stop?', prompt: `What is a reasonable stop-loss distance for a ${effSide} ${entry.symbol} position right now, and what risk-reward does it imply? Dry run only.` },
+            ]}
+          />
+        )}
+        <div className="mono" style={{ fontSize: 11, color: 'var(--ink-faint)' }}>{isLive ? 'Live agency positions · 1x long · real swap legs · settled from server marks' : 'Demo price-game positions · settled from server marks'}</div>
+        {entry && (
+          <Card title={`${entry.symbol} · Take profit / Stop loss`} sub="ARMS WITH THE POSITION">
+            <BracketChart
+              asset={entry.tokenId ?? (entry.networkId === 'solana-devnet' ? 'solana' : entry.networkId)}
+              symbol={entry.symbol}
+              tpPct={Number.isFinite(parseFloat(advTp)) ? parseFloat(advTp) : 6}
+              slPct={Number.isFinite(parseFloat(advSl)) ? parseFloat(advSl) : 3}
+              amount={0}
+              notionalUsd={posNotional}
+              collateralUsd={marginNum}
+              side={effSide}
+              onLevels={(t, s) => { setAdvTp(String(t)); setAdvSl(String(s)); }}
+            />
+          </Card>
+        )}
       </div>
       <div className="span-7">
         {list.loading ? <Skeleton /> : (
@@ -322,7 +571,7 @@ function PositionsPane() {
                     </tr>
                   );
                 })}
-                {(!list.data || list.data.length === 0) && <tr><td colSpan={7}><Empty title="No positions" hint="Open your first leveraged position." /></td></tr>}
+                {(!list.data || list.data.length === 0) && <tr><td colSpan={7}><Empty title="No positions" hint={isLive ? 'Open your first 1x long position.' : 'Open your first demo position.'} /></td></tr>}
               </tbody>
             </table>
           </div>

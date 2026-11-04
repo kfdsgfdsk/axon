@@ -16,9 +16,12 @@ import {
   getUsdPrice,
   getMidWithMeta,
   getPriceBatch,
-  DEFAULT_STABLE_BY_NETWORK,
   isStableTokenId,
 } from '../../services/trading/price.service';
+import {
+  defaultEmergencyStables,
+  resolveExitLeg,
+} from '../../services/trading/settlement';
 import { getHotWalletAddress } from '../../services/blockchain/withdrawalBroadcaster.service';
 import { allocateSwapReceiveAddress } from '../../services/blockchain/depositAddress.service';
 import {
@@ -40,7 +43,11 @@ import logger from '../../utils/logger';
 import { runBeginnerMonitor } from './beginner.service';
 import { paginateById } from '../../utils/batch';
 import { getHubPrice, readSharedMarks } from '../../services/trading/priceHub.service';
-import { needsDirectionalCheck } from '../../services/trading/triggerBand';
+import {
+  hasEmbeddedStop,
+  needsDirectionalCheck,
+  takeProfitLegArmed,
+} from '../../services/trading/triggerBand';
 import {
   addTrigger,
   removeTrigger,
@@ -1529,8 +1536,14 @@ export async function createConditionalOrder(input: {
   stopLossPct?: number; // min loss / stop %
   /** Absolute USD trigger (optional alternative to pct) */
   triggerPriceUsd?: number;
-  /** Exit into this asset (default: same-chain USDC) */
+  /**
+   * Exit into this asset (default: settlement matrix — same-chain stable,
+   * cross-chain USDC on Base for bitcoin/tron). Must be a stablecoin; a
+   * swap route from networkId to the settlement chain must exist.
+   */
   toTokenId?: string | null;
+  /** Settlement chain override (default: matrix leg for networkId). */
+  toNetworkId?: string | null;
   expiresInHours?: number;
 }) {
   if (await isTradingPaused()) throw tradingPausedError();
@@ -1559,14 +1572,10 @@ export async function createConditionalOrder(input: {
   }
 
   const fromTid = normalizeTokenId(input.tokenId);
-  const toTid =
-    normalizeTokenId(input.toTokenId) ||
-    DEFAULT_STABLE_BY_NETWORK[input.networkId] ||
-    '';
-
-  if (!toTid) {
-    throw new ValidationError('No default stable for this network; pass toTokenId');
-  }
+  // Settlement leg: matrix default (cross-chain for bitcoin/tron) or an
+  // explicitly validated stable + route. Fails closed when unroutable.
+  const leg = await resolveExitLeg(input.networkId, input.toNetworkId, input.toTokenId);
+  const toTid = leg.tokenId;
 
   const amount = new Prisma.Decimal(input.amount);
   if (amount.lte(0)) throw new ValidationError('Amount must be positive');
@@ -1655,7 +1664,7 @@ export async function createConditionalOrder(input: {
           fromNetworkId: input.networkId,
           fromTokenId: fromTid,
           fromAmount: amount,
-          toNetworkId: input.networkId, // same-chain exit by default
+          toNetworkId: leg.networkId,
           toTokenId: toTid,
           lockedAmount: lockAmount,
           entryPriceUsd: entry,
@@ -1685,7 +1694,7 @@ export async function createConditionalOrder(input: {
             fromNetworkId: input.networkId,
             fromTokenId: fromTid,
             fromAmount: amount,
-            toNetworkId: input.networkId,
+            toNetworkId: leg.networkId,
             toTokenId: toTid,
             lockedAmount: lockAmount,
             entryPriceUsd: entry,
@@ -1805,13 +1814,30 @@ export async function upsertEmergencyProtection(input: {
   if (drop.lte(0) || drop.gte(100)) {
     throw new ValidationError('dropPct must be between 0 and 100');
   }
+  // Every configured exit target must be a registered, active, admin-declared
+  // stablecoin — never persist a raw string the monitor cannot execute.
+  if (input.stableTokenByNetwork) {
+    for (const [net, tid] of Object.entries(input.stableTokenByNetwork)) {
+      const id = normalizeTokenId(tid);
+      if (!id) {
+        throw new ValidationError(`Emergency stable for ${net} must not be empty`);
+      }
+      // getToken throws ValidationError when unknown/inactive.
+      await getToken(id);
+      if (!isStableTokenId(id)) {
+        throw new ValidationError(
+          `Emergency exit for ${net} must be a stablecoin (usdc-*, usdt-*, dai-*); got ${id}`
+        );
+      }
+    }
+  }
   return prisma.emergencyProtection.upsert({
     where: { userId: input.userId },
     create: {
       userId: input.userId,
       enabled: input.enabled,
       dropPct: drop,
-      stableTokenByNetwork: input.stableTokenByNetwork ?? DEFAULT_STABLE_BY_NETWORK,
+      stableTokenByNetwork: input.stableTokenByNetwork ?? defaultEmergencyStables(),
       watchTokenIds: input.watchTokenIds ?? [],
     },
     update: {
@@ -2011,9 +2037,10 @@ export async function evaluatePriceDrivenTriggers(
     where: {
       id: { in: orderIds },
       status: 'OPEN',
-      type: paused
-        ? 'STOP_LOSS'
-        : { in: ['TAKE_PROFIT', 'STOP_LOSS'] },
+      // While paused, TP rows stay candidates: rows with an embedded SL leg
+      // evaluate that leg below; pure-TP rows are skipped per-row (the index
+      // entry is kept so they fire after unpause).
+      type: { in: ['TAKE_PROFIT', 'STOP_LOSS'] },
       },
   });
   if (orders.length === 0) {
@@ -2033,6 +2060,11 @@ export async function evaluatePriceDrivenTriggers(
         removeItems.push({ orderId: o.id, priceKey: orderPriceKey(o) });
         continue;
       }
+
+      // While paused, TP rows evaluate their embedded SL leg only; pure-TP
+      // rows wait (index entry kept — no removeItems here).
+      const slOnly = paused && o.type === 'TAKE_PROFIT';
+      if (slOnly && !hasEmbeddedStop(o.quotePayload)) continue;
 
       // Optional min hold before TP fire (price-driven path)
       const minHold = config.trading.minHoldTimeMs || 0;
@@ -2062,10 +2094,10 @@ export async function evaluatePriceDrivenTriggers(
             )
           : o.triggerPriceUsd;
       let hit = false;
-      if (o.type === 'TAKE_PROFIT' && px.gte(tpLevel)) hit = true;
+      if (o.type === 'TAKE_PROFIT' && !slOnly && px.gte(tpLevel)) hit = true;
       if (o.type === 'STOP_LOSS' && px.lte(o.triggerPriceUsd)) hit = true;
 
-      // Dual TP+SL stored on TAKE_PROFIT row
+      // Dual TP+SL stored on TAKE_PROFIT row (evaluated during hold + pause)
       if (o.type === 'TAKE_PROFIT' && o.quotePayload && typeof o.quotePayload === 'object') {
         const sl = (o.quotePayload as { stopLossTriggerUsd?: unknown }).stopLossTriggerUsd;
         if (sl && px.lte(new Prisma.Decimal(sl as string | number))) hit = true;
@@ -2209,9 +2241,11 @@ async function checkConditionalOrders(opts?: {
   let triggered = 0;
   const t0 = Date.now();
 
-  const conditionalTypes: TradeOrderType[] = opts?.protectiveOnly
-    ? ['STOP_LOSS']
-    : ['TAKE_PROFIT', 'STOP_LOSS'];
+  // Fetch both types even while paused: TAKE_PROFIT rows carrying an embedded
+  // SL leg (dual-leg single-row brackets) must still evaluate their protective
+  // leg. Pure-TP rows are skipped per-row below (pausedSkipIds).
+  const conditionalTypes: TradeOrderType[] = ['TAKE_PROFIT', 'STOP_LOSS'];
+  const protectiveOnly = !!opts?.protectiveOnly;
 
   await paginateById(
     pageSize,
@@ -2237,18 +2271,26 @@ async function checkConditionalOrders(opts?: {
 
       const near: typeof withTrigger = [];
       const farIds: string[] = [];
+      const pausedSkipIds: string[] = [];
 
       for (const o of withTrigger) {
+        // While paused, TP rows evaluate their embedded SL leg only; pure-TP
+        // rows cannot fire and wait for unpause.
+        const slOnly = protectiveOnly && o.type === 'TAKE_PROFIT';
+        if (slOnly && !hasEmbeddedStop(o.quotePayload)) {
+          pausedSkipIds.push(o.id);
+          continue;
+        }
         const hub = getHubPrice(orderPriceKey(o));
         const trigger = positiveNum(o.triggerPriceUsd);
         const needs =
-          o.type === 'STOP_LOSS'
+          o.type === 'STOP_LOSS' || slOnly
             ? needsDirectionalCheck({
                 bandPct,
                 mark: hub?.price ?? null,
                 markStale: hub ? hub.stale : true,
                 upTrigger: null,
-                downTrigger: trigger,
+                downTrigger: slOnly ? embeddedStop(o.quotePayload) : trigger,
               })
             : needsDirectionalCheck({
                 bandPct,
@@ -2269,6 +2311,14 @@ async function checkConditionalOrders(opts?: {
         await prisma.tradeOrder.updateMany({
           where: { id: { in: farIds }, status: 'OPEN' },
           data: { nextCheckAt: nextFar },
+        });
+      }
+      // Paused-out rows are rechecked next tick (not far-deferred) so they
+      // resume promptly after unpause.
+      if (pausedSkipIds.length > 0) {
+        await prisma.tradeOrder.updateMany({
+          where: { id: { in: pausedSkipIds }, status: 'OPEN' },
+          data: { nextCheckAt: new Date(Date.now() + nearDeferMs) },
         });
       }
       if (near.length === 0) return;
@@ -2300,17 +2350,15 @@ async function checkConditionalOrders(opts?: {
             continue;
           }
 
-          // Optional min hold before TP fire
-          const minHold = config.trading.minHoldTimeMs || 0;
-          if (
-            minHold > 0 &&
-            o.type === 'TAKE_PROFIT' &&
-            o.createdAt &&
-            Date.now() - new Date(o.createdAt).getTime() < minHold
-          ) {
-            stillOpenNearIds.push(o.id);
-            continue;
-          }
+          // Pause and min-hold gate the take-profit leg ONLY — the embedded
+          // SL leg below always evaluates (matches the price-driven path
+          // and the beginner monitor).
+          const tpArmed = takeProfitLegArmed({
+            type: o.type,
+            protectiveOnly,
+            minHoldMs: config.trading.minHoldTimeMs || 0,
+            createdAt: o.createdAt,
+          });
 
           const px = new Prisma.Decimal(meta.price);
           // Optional TP trigger buffer (bps) — more conservative fire, not a fill price
@@ -2320,10 +2368,10 @@ async function checkConditionalOrders(opts?: {
               ? o.triggerPriceUsd.mul(new Prisma.Decimal(1).plus(new Prisma.Decimal(spreadBps).div(10_000)))
               : o.triggerPriceUsd;
           let hit = false;
-          if (o.type === 'TAKE_PROFIT' && px.gte(tpLevel)) hit = true;
+          if (o.type === 'TAKE_PROFIT' && tpArmed && px.gte(tpLevel)) hit = true;
           if (o.type === 'STOP_LOSS' && px.lte(o.triggerPriceUsd)) hit = true;
 
-          // Dual TP+SL stored on TAKE_PROFIT row
+          // Dual TP+SL stored on TAKE_PROFIT row (evaluated during hold + pause)
           if (o.type === 'TAKE_PROFIT' && o.quotePayload && typeof o.quotePayload === 'object') {
             const sl = (o.quotePayload as any).stopLossTriggerUsd;
             if (sl && px.lte(new Prisma.Decimal(sl))) hit = true;
@@ -2488,12 +2536,27 @@ async function checkEmergencyProtections() {
           );
           if (new Prisma.Decimal(price).gt(dropThreshold)) continue;
 
-          const stableMap = (p.stableTokenByNetwork || DEFAULT_STABLE_BY_NETWORK) as Record<
+          const stableMap = (p.stableTokenByNetwork || defaultEmergencyStables()) as Record<
             string,
             string
           >;
-          const stableId = stableMap[b.networkId] || DEFAULT_STABLE_BY_NETWORK[b.networkId];
-          if (!stableId) continue;
+          const stableId = stableMap[b.networkId];
+          // Resolve the exit leg (stable validation + route check). Cross-chain
+          // for bitcoin/tron via the matrix default. A missing or unroutable
+          // leg skips THIS balance with an explicit reason — never silently.
+          let leg: { networkId: string; tokenId: string };
+          try {
+            leg = await resolveExitLeg(b.networkId, undefined, stableId || undefined);
+          } catch (err: any) {
+            logger.warn('Emergency protection skipped: no executable exit leg', {
+              userId: p.userId,
+              networkId: b.networkId,
+              tokenId: b.tokenId,
+              stableId: stableId || null,
+              reason: err?.message || String(err),
+            });
+            continue;
+          }
 
           logger.warn('Emergency protection triggered', {
             userId: p.userId,
@@ -2502,6 +2565,8 @@ async function checkEmergencyProtections() {
             price,
             ref: ref.toString(),
             dropPct: p.dropPct.toString(),
+            toNetworkId: leg.networkId,
+            toTokenId: leg.tokenId,
           });
 
           try {
@@ -2510,8 +2575,8 @@ async function checkEmergencyProtections() {
                 userId: p.userId,
                 fromNetworkId: b.networkId,
                 fromTokenId: b.tokenId,
-                toNetworkId: b.networkId,
-                toTokenId: stableId,
+                toNetworkId: leg.networkId,
+                toTokenId: leg.tokenId,
                 amount: b.available.toString(),
                 slippagePct: Math.max(config.trading.defaultSlippage, 2),
               },

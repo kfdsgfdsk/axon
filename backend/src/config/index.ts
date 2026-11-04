@@ -584,6 +584,9 @@ const config = {
      * Comma-separated Binance symbols for Tier-1 hub (WS + REST).
      * Default covers majors + liquid alts. Expand carefully — combined stream
      * has practical limits; prefer PRICE_BINANCE_SYMBOL_MAP for extra mappings.
+     * NOTE: MATICUSDT is deliberately absent (Binance delisted it after the
+     * MATIC→POL migration; POLUSDT below covers it). One invalid symbol used
+     * to 400 the whole REST batch — the batcher now also quarantines rejects.
      */
     priceBeginnerSymbols: optionalEnv(
       'PRICE_BEGINNER_SYMBOLS',
@@ -593,7 +596,6 @@ const config = {
         'SOLUSDT',
         'BNBUSDT',
         'AVAXUSDT',
-        'MATICUSDT',
         'POLUSDT',
         'TRXUSDT',
         'DOGEUSDT',
@@ -918,6 +920,26 @@ const config = {
     rateLimitMax: parseInt(optionalEnv('AGENT_RATE_LIMIT_MAX', '30'), 10) || 30,
     maxNotionalUsd: parseFloat(optionalEnv('AGENT_MAX_NOTIONAL_USD', '10000')) || 10_000,
     maxSlippageBps: parseInt(optionalEnv('AGENT_MAX_SLIPPAGE_BPS', '100'), 10) || 100,
+    /**
+     * Proposal-time mark freshness (ms). The 3s settlement bar
+     * (TRADE_MAX_STALE_PRICE_MS) still gates execution/placement, but a crew
+     * run lasts minutes — a price fetched during the run stays a valid
+     * proposal base within this window instead of forcing HOLD. Default 5m
+     * covers the crew deadline.
+     */
+    markFreshMs:
+      parseInt(optionalEnv('AGENT_MARK_FRESH_MS', '300000'), 10) || 300_000,
+    /**
+     * AI desk-mode inference: the fast model classifies the user's message
+     * into a MuseCapability before the crew runs, so typos, fragments, and
+     * non-native phrasing route correctly. Any failure (no key, timeout,
+     * garbage label) falls back to the deterministic rules in capability.ts —
+     * routing never breaks, it only loses the fuzzy understanding.
+     */
+    capabilityAi: optionalEnv('AGENT_CAPABILITY_AI', 'true') !== 'false',
+    /** Ceiling for the single-shot classification call (fail fast to rules). */
+    capabilityAiTimeoutMs:
+      parseInt(optionalEnv('AGENT_CAPABILITY_AI_TIMEOUT_MS', '8000'), 10) || 8000,
   },
 };
 

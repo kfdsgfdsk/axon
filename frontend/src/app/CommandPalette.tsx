@@ -4,8 +4,8 @@ import { Modal } from '../ui/primitives';
 import { useMode } from '../lib/mode';
 import { useKeys } from '../lib/hooks';
 import {
-  IconActivity, IconAgent, IconDeposit, IconKeys, IconMarkets,
-  IconOverview, IconTrade, IconWithdraw, IconBolt,
+  IconActivity, IconAgent, IconDeposit, IconMarkets,
+  IconOverview, IconTrade, IconUser, IconWithdraw, IconBolt,
 } from '../ui/icons';
 
 interface Item { label: string; hint: string; icon: React.ReactNode; run: () => void }
@@ -33,7 +33,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     { label: 'Go to Withdrawals', hint: 'G W', icon: <IconWithdraw />, run: () => nav('/withdrawals') },
     { label: 'Go to Agent', hint: 'G A', icon: <IconAgent />, run: () => nav('/agent') },
     { label: 'Go to Activity', hint: 'G H', icon: <IconActivity />, run: () => nav('/activity') },
-    { label: 'Go to Agent keys', hint: 'G K', icon: <IconKeys />, run: () => nav('/keys') },
+    { label: 'Go to Profile', hint: 'G P', icon: <IconUser />, run: () => nav('/profile') },
     { label: `Switch to ${mode === 'demo' ? 'LIVE' : 'DEMO'} mode`, hint: 'MODE', icon: <IconBolt />, run: () => setMode(mode === 'demo' ? 'live' : 'demo') },
     { label: 'Ask agent: “Review my portfolio”', hint: 'AI', icon: <IconAgent />, run: () => askAgent('Review my portfolio and flag anything I should change this week.') },
     { label: 'Ask agent: “Plan a $2k rotation”', hint: 'AI', icon: <IconAgent />, run: () => askAgent('Plan a $2,000 rotation into momentum with tight risk. Dry run only.') },

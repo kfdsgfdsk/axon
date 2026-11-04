@@ -150,7 +150,7 @@ async function api<T>(path: string, opts: { token?: string; method?: string; bod
   return (await res.json()) as T;
 }
 
-async function makeSession(): Promise<{ jwt: string; agentKey: string; agentKeyId: string; email: string; password: string }> {
+async function makeSession(): Promise<{ jwt: string; email: string; password: string }> {
   const email = `crew-fuzz-${Date.now().toString(36)}@axon.local`;
   const password = `CrewFuzz${Date.now().toString(36)}1aA!`;
   try {
@@ -161,17 +161,7 @@ async function makeSession(): Promise<{ jwt: string; agentKey: string; agentKeyI
   const login = await api<any>('/api/v1/auth/login', { method: 'POST', body: { email, password } });
   const jwt = login?.data?.accessToken;
   if (!jwt) fail('login did not return an accessToken');
-  const csrfRes = await fetch(`${API}/api/v1/csrf-token`);
-  const csrfToken = ((await csrfRes.json()) as any)?.data?.csrfToken;
-  const cookie = (csrfRes.headers.get('set-cookie') || '').match(/csrf_token=[^;]+/)?.[0] || '';
-  const created = await fetch(`${API}/api/v1/agent/keys`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}`, Cookie: cookie, 'x-csrf-token': csrfToken },
-    body: JSON.stringify({ name: 'crew-fuzz', scopes: ['read', 'trade'] }),
-  });
-  if (!created.ok) fail(`agent key mint → ${created.status}`);
-  const keyData = ((await created.json()) as any)?.data || {};
-  return { jwt, agentKey: keyData.key || keyData.secret, agentKeyId: String(keyData.id || ''), email, password };
+  return { jwt, email, password };
 }
 
 /** Fresh access token (campaigns outlive the 15-minute JWT). */
@@ -181,20 +171,6 @@ async function refreshJwt(s: { jwt: string; email: string; password: string }): 
     body: { email: s.email, password: s.password },
   });
   if (login?.data?.accessToken) s.jwt = login.data.accessToken;
-}
-
-async function revokeSession(s: { jwt: string; agentKeyId: string }): Promise<void> {
-  try {
-    const csrfRes = await fetch(`${API}/api/v1/csrf-token`);
-    const csrfToken = ((await csrfRes.json()) as any)?.data?.csrfToken;
-    const cookie = (csrfRes.headers.get('set-cookie') || '').match(/csrf_token=[^;]+/)?.[0] || '';
-    await fetch(`${API}/api/v1/agent/keys/${s.agentKeyId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${s.jwt}`, Cookie: cookie, 'x-csrf-token': csrfToken },
-    });
-  } catch {
-    /* best effort */
-  }
 }
 
 interface SseEvent { t: number; type: string; data: any }
@@ -426,7 +402,7 @@ async function main(): Promise<void> {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   async function runOnce(p: Prompt): Promise<{ events: SseEvent[]; ms: number }> {
     const t0 = Date.now();
-    const events = await postStream(session.agentKey, {
+    const events = await postStream(session.jwt, {
       capability: p.capability,
       message: p.message,
       mode: p.mode,
@@ -496,7 +472,7 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    await revokeSession(session);
+    /* nothing to revoke: JWT-only sessions */
   }
   const lines = [`# crew fuzz ${stamp}`, ''];
   for (const r of rows) {

@@ -60,7 +60,21 @@ jest.mock('../../src/services/trading/price.service', () => ({
   getMidWithMeta: jest.fn(async () => ({ price: 2000, stale: false, ageMs: 10 })),
   getPriceBatch: jest.fn(),
   DEFAULT_STABLE_BY_NETWORK: {},
-  isStableTokenId: jest.fn(),
+  isStableTokenId: jest.fn(() => true),
+}));
+
+jest.mock('../../src/services/blockchain/tokenRegistry.service', () => ({
+  __esModule: true,
+  getToken: jest.fn(async (id: string) => ({
+    id,
+    symbol: 'USDC',
+    networkId: String(id).split('-').pop() || 'ethereum',
+    contractAddress: '0x0',
+    decimals: 6,
+    standard: 'erc20',
+    isActive: true,
+    isStable: true,
+  })),
 }));
 
 jest.mock('../../src/services/trading/triggerIndex.service', () => ({

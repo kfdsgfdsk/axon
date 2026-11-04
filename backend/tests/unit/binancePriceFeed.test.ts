@@ -46,6 +46,7 @@ import {
   refreshDynamicSymbols,
   diffSubscriptions,
   getBinanceWsStats,
+  resetInvalidSymbolsForTest,
 } from '../../src/services/trading/binancePriceFeed.service';
 import { publishPrice, getHubPrice } from '../../src/services/trading/priceHub.service';
 import {
@@ -173,6 +174,92 @@ describe('REST fallback (gap-filler only)', () => {
       'rest-refresh'
     );
     expect(getBinanceWsStats().restFallbackFetches).toBeGreaterThan(0);
+  });
+
+  test('one invalid symbol does not poison the batch (isolated + quarantined)', async () => {
+    resetInvalidSymbolsForTest();
+    getHubPriceMock.mockReturnValue(null); // everything stale
+    const invalidBody = JSON.stringify({ code: -1121, msg: 'Invalid symbol.' });
+    const fetchMock = jest.fn(async (url: unknown) => {
+      const u = String(url);
+      const hasBtc = u.includes('BTCUSDT');
+      const hasEth = u.includes('ETHUSDT');
+      if (hasBtc && hasEth) {
+        // Whole batch rejected because of the bad apple.
+        return { ok: false, status: 400, text: async () => invalidBody };
+      }
+      if (hasBtc) {
+        return { ok: true, json: async () => [{ symbol: 'BTCUSDT', price: '50000' }] };
+      }
+      return { ok: false, status: 400, text: async () => invalidBody };
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await restTick();
+
+    // Batch + one probe per symbol.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Valid mark still lands...
+    expect(publishPriceMock).toHaveBeenCalledWith(
+      'binance:btcusdt',
+      50000,
+      'rest-refresh'
+    );
+    // ...bad symbol quarantined instead of retried forever.
+    expect(publishPriceMock).not.toHaveBeenCalledWith(
+      'binance:ethusdt',
+      expect.anything(),
+      expect.anything()
+    );
+    expect(getBinanceWsStats().quarantinedSymbols).toEqual(['ETHUSDT']);
+  });
+
+  test('quarantined symbols are excluded from later batches', async () => {
+    resetInvalidSymbolsForTest();
+    getHubPriceMock.mockReturnValue(null);
+    const invalidBody = JSON.stringify({ code: -1121, msg: 'Invalid symbol.' });
+    // First tick quarantines ETHUSDT.
+    global.fetch = (jest.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.includes('BTCUSDT') && u.includes('ETHUSDT')) {
+        return { ok: false, status: 400, text: async () => invalidBody };
+      }
+      if (u.includes('BTCUSDT')) {
+        return { ok: true, json: async () => [{ symbol: 'BTCUSDT', price: '50000' }] };
+      }
+      return { ok: false, status: 400, text: async () => invalidBody };
+    }) as unknown) as typeof fetch;
+    await restTick();
+    expect(getBinanceWsStats().quarantinedSymbols).toEqual(['ETHUSDT']);
+
+    // Second tick: batch URL must not contain the quarantined symbol.
+    jest.clearAllMocks();
+    getHubPriceMock.mockReturnValue(null);
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ symbol: 'BTCUSDT', price: '50000' }],
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    await restTick();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = String(fetchMock.mock.calls[0][0]);
+    expect(url).toContain('BTCUSDT');
+    expect(url).not.toContain('ETHUSDT');
+  });
+
+  test('transient batch failures are retried, never quarantined', async () => {
+    resetInvalidSymbolsForTest();
+    getHubPriceMock.mockReturnValue(null);
+    global.fetch = (jest.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => 'internal error',
+    }) as unknown) as typeof fetch;
+
+    await restTick();
+
+    expect(getBinanceWsStats().quarantinedSymbols).toEqual([]);
+    expect(publishPriceMock).not.toHaveBeenCalled();
   });
 });
 

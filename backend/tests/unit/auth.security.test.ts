@@ -184,6 +184,16 @@ describe('S-L2 refresh grace window', () => {
     expect(prismaMock.refreshToken.updateMany).toHaveBeenCalled();
   });
 
+  test('token revoked long ago is a stale client: quiet 401, no family nuke', async () => {
+    prismaMock.refreshToken.findUnique.mockResolvedValue({
+      ...revokedRow,
+      revokedAt: new Date(Date.now() - 2 * 3600_000),
+    });
+    await expect(refresh('old-token')).rejects.toThrow(/Invalid or expired refresh token/);
+    expect(prismaMock.session.updateMany).not.toHaveBeenCalled();
+    expect(prismaMock.refreshToken.updateMany).not.toHaveBeenCalled();
+  });
+
   test('successful rotation stores a grace record for the old hash', async () => {
     const crypto = jest.requireActual('crypto') as typeof import('crypto');
     prismaMock.refreshToken.findUnique.mockResolvedValue({ ...revokedRow, revokedAt: null });

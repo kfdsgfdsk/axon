@@ -5,7 +5,7 @@
  *  - extract the JSON object (tolerates fences / prose)
  *  - schema-validate every field
  *  - cap the number of actions
- *  - redact any outbound-transfer / withdraw intent (AgentKeys can never withdraw)
+ *  - redact any outbound-transfer / withdraw intent (the agent can never withdraw)
  *  - fall back to a safe HOLD proposal when parsing fails
  *
  * A Proposal is NEVER an executable order. Execution stays behind the
@@ -48,6 +48,7 @@ const modelProposalSchema = z.object({
   actions: z.array(actionSchema).max(50).optional(),
   risks: z.array(z.string().max(1000)).max(50).optional(),
   assumptions: z.array(z.string().max(1000)).max(50).optional(),
+  invalidation: z.array(z.string().max(500)).max(10).optional(),
   critique: z.string().max(8000).optional(),
 });
 
@@ -91,6 +92,10 @@ export function enforceProposalSafety(
     assumptions: proposal.assumptions
       .map((r) => sanitizeUntrusted(r, 1000))
       .slice(0, 50),
+    invalidation: proposal.invalidation
+      ?.map((r) => sanitizeUntrusted(r, 500))
+      .filter(Boolean)
+      .slice(0, 10),
     critique: proposal.critique
       ? redactDangerous(sanitizeUntrusted(proposal.critique, 8000))
       : undefined,
@@ -166,6 +171,7 @@ export function parseModelProposal(
     actions,
     risks: data.risks || [],
     assumptions: data.assumptions || [],
+    invalidation: data.invalidation,
     critique: data.critique,
     createdAt: new Date().toISOString(),
   };
@@ -222,6 +228,9 @@ export function renderProposalText(p: Proposal): string {
   if (p.risks.length > 0) lines.push(`Risks: ${p.risks.map((r) => humanizeText(r)).join('; ')}`);
   if (p.assumptions.length > 0) {
     lines.push(`Assumptions: ${p.assumptions.map((r) => humanizeText(r)).join('; ')}`);
+  }
+  if (p.invalidation && p.invalidation.length > 0) {
+    lines.push(`Invalidation: ${p.invalidation.map((r) => humanizeText(r)).join('; ')}`);
   }
   if (p.critique) lines.push(`Critique: ${humanizeText(p.critique)}`);
   return lines.join('\n');

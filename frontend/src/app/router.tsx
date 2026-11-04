@@ -13,7 +13,7 @@ import { DepositsPage } from '../features/deposits/DepositsPage';
 import { WithdrawalsPage } from '../features/withdrawals/WithdrawalsPage';
 import { AgentPage } from '../features/agent/AgentPage';
 import { ActivityPage } from '../features/activity/ActivityPage';
-import { KeysPage } from '../features/settings/KeysPage';
+import { ProfilePage } from '../features/settings/ProfilePage';
 
 function Gate({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -48,7 +48,7 @@ export function App() {
                   <Route path="/withdrawals" element={<WithdrawalsPage />} />
                   <Route path="/agent" element={<AgentPage />} />
                   <Route path="/activity" element={<ActivityPage />} />
-                  <Route path="/keys" element={<KeysPage />} />
+                  <Route path="/profile" element={<ProfilePage />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
               </Shell>

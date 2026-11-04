@@ -22,11 +22,8 @@
  *   - The runner ABORTS unless each result has dryRun:true and a
  *     non-ALLOW policy, and FAILS LOUDLY if any turn used the scripted
  *     demo provider (result.demo === true) instead of the real model.
- *   - Auth: registers a throwaway user, then mints an AgentKey with
- *     exactly ['read','trade'] (strategy capability requires trade
- *     scope; plain user JWTs are read-only by design). The runner
- *     asserts the granted scopes and never requests withdraw (the
- *     schema has no such scope). The key is revoked at the end.
+ *   - Auth: registers a throwaway user and runs every scenario with
+ *     that user's JWT (agent routes are JWT-only).
  *
  * REQUIRED ENV (server side, backend/.env.agent)
  *   MUSE_API_KEY=<valid key>   (have it? the suite refuses scripted mode)
@@ -141,9 +138,6 @@ function fail(msg: string): never {
 
 interface Session {
   jwt: string;
-  agentKey: string;
-  agentKeyId: string;
-  scopes: string[];
 }
 
 async function ensureSession(): Promise<Session> {
@@ -157,50 +151,7 @@ async function ensureSession(): Promise<Session> {
   const login = await api<any>('/api/v1/auth/login', { method: 'POST', body: { email, password } });
   const jwt = login?.data?.accessToken;
   if (!jwt) fail('login did not return an accessToken');
-
-  // Strategy runs need trade scope → mint an AgentKey (double-submit CSRF).
-  const csrfRes = await fetch(`${API}/api/v1/csrf-token`);
-  if (!csrfRes.ok) fail(`csrf-token → ${csrfRes.status}`);
-  const csrfToken = ((await csrfRes.json()) as any)?.data?.csrfToken;
-  const setCookie = csrfRes.headers.get('set-cookie') || '';
-  const cookie = setCookie.match(/csrf_token=[^;]+/)?.[0] || '';
-  if (!csrfToken || !cookie) fail('could not obtain CSRF cookie/token pair');
-  const created = await fetch(`${API}/api/v1/agent/keys`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${jwt}`,
-      Cookie: cookie,
-      'x-csrf-token': csrfToken,
-    },
-    body: JSON.stringify({ name: 'crew-live-scenarios', scopes: ['read', 'trade'] }),
-  });
-  if (!created.ok) fail(`agent key mint → ${created.status}: ${(await created.text()).slice(0, 200)}`);
-  const keyData = ((await created.json()) as any)?.data || {};
-  const agentKey = keyData.key || keyData.secret;
-  const scopes: string[] = Array.isArray(keyData.scopes) ? keyData.scopes : [];
-  if (!agentKey || !String(agentKey).startsWith('ak_')) fail('agent key response had no ak_ secret');
-  if (!scopes.includes('read') || !scopes.includes('trade') || scopes.some((s) => !['read', 'trade'].includes(s))) {
-    fail(`refusing unexpected agent scopes: ${JSON.stringify(scopes)}`);
-  }
-  console.log(`preflight: minted agent key id=${keyData.id} scopes=[${scopes.join(',')}] (revoked at end)`);
-  return { jwt, agentKey, agentKeyId: String(keyData.id || ''), scopes };
-}
-
-async function revokeSession(s: Session): Promise<void> {
-  if (!s.agentKeyId) return;
-  try {
-    const csrfRes = await fetch(`${API}/api/v1/csrf-token`);
-    const csrfToken = ((await csrfRes.json()) as any)?.data?.csrfToken;
-    const cookie = (csrfRes.headers.get('set-cookie') || '').match(/csrf_token=[^;]+/)?.[0] || '';
-    await fetch(`${API}/api/v1/agent/keys/${s.agentKeyId}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${s.jwt}`, Cookie: cookie, 'x-csrf-token': csrfToken },
-    });
-    console.log('cleanup: agent key revoked');
-  } catch (e: any) {
-    console.log(`cleanup: key revoke skipped (${e?.message || e})`);
-  }
+  return { jwt };
 }
 
 interface SseEvent {
@@ -359,7 +310,6 @@ function analyze(
   result: any,
   book: BookRef,
   health: any,
-  scopes: string[],
   transcript: any[],
   durationMs: number,
 ): ScenarioAnalysis {
@@ -399,7 +349,7 @@ function analyze(
   lines.push(`- prompt: "${sc.prompt}"`);
   lines.push(`- mode: ${MODE} · duration: ${(durationMs / 1000).toFixed(1)}s · events: ${events.length}`);
   lines.push(`- LIVE PROOF: provider=${result?.meta?.provider || health?.provider || '?'} · scriptedFlag=${JSON.stringify(result?.demo ?? null)} · models=[${models.join(', ') || '?'}] · reasoning=${JSON.stringify(health?.reasoningEffort ?? null)} · usage=${JSON.stringify(result?.usage || null)}`);
-  lines.push(`- SAFETY: dryRun=${JSON.stringify(result?.dryRun)} · policy=${result?.policy?.kind || '?'} · demoBook=${JSON.stringify(result?.demoBook ?? null)} · scopes=[${scopes.join(',')}] (no withdraw exists)`);
+  lines.push(`- SAFETY: dryRun=${JSON.stringify(result?.dryRun)} · policy=${result?.policy?.kind || '?'} · demoBook=${JSON.stringify(result?.demoBook ?? null)} (agent cannot withdraw)`);
   lines.push(`- book seen by crew: ${book.balanceCount} balances · ${book.orderCount} orders (${book.openOrderIds.length} open)`);
   lines.push(`- tools called:\n${toolLedger(events).join('\n')}`);
   lines.push(`- evidence freshness (transcript payloads):\n${evidenceFreshness(transcript).join('\n')}`);
@@ -485,7 +435,7 @@ async function main(): Promise<void> {
     const t0 = Date.now();
     try {
       const events = await postStream(
-        session.agentKey,
+        session.jwt,
         {
           capability: 'strategy',
           message: sc.prompt,
@@ -526,7 +476,7 @@ async function main(): Promise<void> {
       } catch (e: any) {
         console.log(`note: transcript fetch failed (${e?.message || e})`);
       }
-      const analysis = analyze(sc, events, result, book, health, session.scopes, transcript, durationMs);
+      const analysis = analyze(sc, events, result, book, health, transcript, durationMs);
       analyses.push(analysis);
       writeFileSync(join(OUT, `${sc.id}.json`), JSON.stringify({ scenario: sc, events, result, transcript }, null, 1));
       writeFileSync(join(OUT, `${sc.id}.analysis.md`), `# ${sc.name}\n\n${analysis.markdown}\n`);
@@ -542,7 +492,6 @@ async function main(): Promise<void> {
     join(OUT, 'run.json'),
     JSON.stringify({ stamp: STAMP, api: API, mode: MODE, health, book, analyses }, null, 1),
   );
-  await revokeSession(session);
   console.log(`\n${'='.repeat(72)}\nSUITE DONE: ${analyses.length} ok, ${failed} failed · reports in ${OUT}\n${'='.repeat(72)}`);
   if (failed > 0) process.exit(1);
 }

@@ -16,14 +16,14 @@ describe('resolveReasoningEffort', () => {
     }
   });
 
-  test('deep mode gives reasoning-heavy roles the configured effort', () => {
-    for (const role of ['strategist', 'judge', 'red_slippage', 'red_concentration', 'red_stale', 'red_policy'] as const) {
+  test('deep mode gives structured roles the configured effort', () => {
+    for (const role of ['strategist', 'judge'] as const) {
       expect(resolveReasoningEffort(role, 'deep', 'xhigh')).toBe('xhigh');
     }
   });
 
-  test('deep mode gives support roles low effort', () => {
-    for (const role of ['scout', 'simulator', 'risk', 'explainer'] as const) {
+  test('deep mode gives short-take roles low effort (red debate stays fast)', () => {
+    for (const role of ['scout', 'simulator', 'risk', 'explainer', 'red_slippage', 'red_concentration', 'red_stale', 'red_policy'] as const) {
       expect(resolveReasoningEffort(role, 'deep', 'max')).toBe('low');
     }
   });
@@ -36,9 +36,9 @@ describe('resolveReasoningEffort', () => {
 });
 
 describe('DEEP_ROLES', () => {
-  test('covers exactly the reasoning-heavy crew', () => {
+  test('covers exactly the structured roles', () => {
     expect(Array.from(DEEP_ROLES).sort()).toEqual(
-      ['judge', 'red_concentration', 'red_policy', 'red_slippage', 'red_stale', 'strategist'].sort()
+      ['judge', 'strategist'].sort()
     );
   });
 });

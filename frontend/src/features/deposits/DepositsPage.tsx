@@ -5,6 +5,8 @@ import { useModeData } from '../../lib/data';
 import { useToast } from '../../lib/toast';
 import { fmtAddr, fmtDateTime, fmtNum, symbolOf } from '../../lib/format';
 import { Badge, Button, Card, Copyable, Empty, Field, Skeleton, statusTone } from '../../ui/primitives';
+import { AskDesk, usePublishDockContext } from '../../ui/AskDesk';
+import type { AskSuggestion } from '../../ui/AskDesk';
 import { IconRefresh, IconScan, IconSearch } from '../../ui/icons';
 import { AssetLogo, CHAIN_META, CHAIN_ORDER, ChainLogo, TokenLogo } from '../../ui/chains';
 import type { ChainId } from '../../ui/chains';
@@ -154,6 +156,13 @@ export function DepositsPage() {
   const curTimer = timerOf(cur || undefined, now);
   const expired = curTimer.state === 'expired';
   const meta = CHAIN_META[sel];
+
+  // First chip carries the user's selected asset; the rest stay general.
+  const firstSuggestion: AskSuggestion = {
+    label: `Fastest network for ${activeSym}?`,
+    prompt: `What is the fastest and cheapest network to deposit ${activeSym} on right now, and why? Compare confirmations and practical wait times.`,
+  };
+  usePublishDockContext(firstSuggestion);
 
   // Picking a chain never touches the backend — each chain keeps its own
   // address + countdown untouched until you explicitly generate on it.
@@ -370,6 +379,13 @@ export function DepositsPage() {
             </div>
           )}
         </Card>
+
+        <AskDesk
+          suggestions={[
+            firstSuggestion,
+            { label: 'Deposit tips', prompt: `Give me practical tips for depositing ${activeSym} on ${meta.name}: minimums, memo/tag pitfalls, and the mistakes that lose funds.` },
+          ]}
+        />
 
         <Card title="Validation" sub={latest ? latest.status : 'NO TRANSFER SEEN'}>
           {!latest ? (

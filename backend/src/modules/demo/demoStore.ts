@@ -25,7 +25,7 @@ import {
   effectiveMinNotionalUsd,
   requiredFeeUsd,
 } from '../trading/trade.service';
-import { DEFAULT_STABLE_BY_NETWORK } from '../../services/trading/price.service';
+import { defaultEmergencyStables } from '../../services/trading/settlement';
 import { buildDemoHistory } from './demoBook';
 import {
   AppError,
@@ -369,6 +369,8 @@ export function demoMarketSwap(
     takeProfitPct:
       input.takeProfitPct != null ? String(input.takeProfitPct) : null,
     stopLossPct: input.stopLossPct != null ? String(input.stopLossPct) : null,
+    triggerPriceUsd: null,
+    stopLossTriggerUsd: null,
     lockedAmount: amount.toString(),
     executedAmount: amount.toString(),
     receivedAmount: out.toString(),
@@ -391,8 +393,10 @@ export interface DemoBracketInput {
   takeProfitPct?: number;
   stopLossPct?: number;
   triggerPriceUsd?: number;
-  /** Resolved exit asset (caller applies the same-chain-stable default). */
+  /** Resolved exit leg (caller resolves via the settlement matrix). */
   toTokenId: string;
+  /** Settlement chain (cross-chain for bitcoin/tron). Defaults to networkId. */
+  toNetworkId?: string;
   entryPrice: number;
   slippageBps?: number;
   now?: Date;
@@ -468,7 +472,7 @@ export function demoBracket(
     fromTokenId: fromTid,
     fromAmount: amount.toString(),
     amount: amount.toString(),
-    toNetworkId: input.networkId,
+    toNetworkId: input.toNetworkId || input.networkId,
     toTokenId: normalizeTokenId(input.toTokenId),
     entryPriceUsd: entry.toString(),
     lockedAmount: amount.toString(),
@@ -482,6 +486,7 @@ export function demoBracket(
   const created: DemoOrderRow[] = [];
   // Live dual-leg: a single TAKE_PROFIT row (one lock) with the SL pct
   // attached; the read shape exposes both pcts so the terminal can show them.
+  // Absolute levels are stored so the demo trigger sweep can fire them.
   if (triggerTp) {
     created.push({
       ...base,
@@ -496,6 +501,8 @@ export function demoBracket(
         triggerSl && input.stopLossPct != null && input.stopLossPct > 0
           ? String(input.stopLossPct)
           : null,
+      triggerPriceUsd: triggerTp.toString(),
+      stopLossTriggerUsd: triggerSl ? triggerSl.toString() : null,
     });
   } else if (triggerSl) {
     created.push({
@@ -508,10 +515,79 @@ export function demoBracket(
         input.stopLossPct != null && input.stopLossPct > 0
           ? String(input.stopLossPct)
           : null,
+      triggerPriceUsd: triggerSl.toString(),
+      stopLossTriggerUsd: null,
     });
   }
   state.orders.unshift(...created);
   return created;
+}
+
+/**
+ * Fire demo bracket legs whose absolute levels the marks have crossed.
+ * Mirrors the live trigger semantics (TP row + embedded SL). Settles
+ * ledger-only at mark-implied stable proceeds (demo exits settle to a
+ * ~$1 stable by construction). Evaluated lazily on demo order reads —
+ * the trade monitor only reads the DB, never demo state.
+ */
+export function settleDemoBracketTriggers(
+  state: DemoState,
+  priceOf: (key: string) => number | null,
+  now?: Date
+): DemoOrderRow[] {
+  const settled: DemoOrderRow[] = [];
+  const at = now ?? new Date();
+  for (const o of state.orders) {
+    if (o.status !== 'OPEN') continue;
+    if (o.type !== 'TAKE_PROFIT' && o.type !== 'STOP_LOSS') continue;
+    if (!o.triggerPriceUsd && !o.stopLossTriggerUsd) continue;
+    const key = o.fromTokenId
+      ? `token:${o.fromTokenId}`
+      : `native:${o.fromNetworkId}`;
+    const mark = priceOf(key);
+    if (!mark || !(mark > 0)) continue;
+    const px = new Prisma.Decimal(mark);
+    let hit = false;
+    if (
+      o.type === 'TAKE_PROFIT' &&
+      o.triggerPriceUsd &&
+      px.gte(new Prisma.Decimal(o.triggerPriceUsd))
+    ) {
+      hit = true;
+    }
+    if (
+      o.type === 'STOP_LOSS' &&
+      o.triggerPriceUsd &&
+      px.lte(new Prisma.Decimal(o.triggerPriceUsd))
+    ) {
+      hit = true;
+    }
+    if (
+      o.type === 'TAKE_PROFIT' &&
+      o.stopLossTriggerUsd &&
+      px.lte(new Prisma.Decimal(o.stopLossTriggerUsd))
+    ) {
+      hit = true;
+    }
+    if (!hit) continue;
+    const amount = new Prisma.Decimal(o.lockedAmount);
+    if (amount.lte(0)) continue;
+    try {
+      demoBurnLocked(state, o.fromNetworkId, o.fromTokenId || null, amount);
+    } catch {
+      continue; // escrow already moved — leave the row for inspection
+    }
+    const proceeds = amount.mul(px);
+    if (proceeds.gt(0)) {
+      demoCredit(state, o.toNetworkId, o.toTokenId || null, proceeds);
+    }
+    o.status = 'COMPLETED';
+    o.executedAmount = amount.toString();
+    o.receivedAmount = proceeds.toString();
+    o.updatedAt = at;
+    settled.push(o);
+  }
+  return settled;
 }
 
 /* ------------------------------------------------------------------ */
@@ -555,6 +631,9 @@ export interface DemoOpenPositionInput {
   stableTokenId: string;
   leverage?: number;
   entryPrice: number;
+  takeProfitPct?: number;
+  stopLossPct?: number;
+  expiresInHours?: number;
   now?: Date;
 }
 
@@ -589,6 +668,23 @@ export function demoOpenPosition(
 
   const now = input.now ?? new Date();
   const notional = margin.mul(lev);
+  // Absolute TP/SL levels mirror live (direction-aware for shorts).
+  let tpUsd: Prisma.Decimal | null = null;
+  let slUsd: Prisma.Decimal | null = null;
+  if (input.takeProfitPct != null && input.takeProfitPct > 0) {
+    const frac = new Prisma.Decimal(input.takeProfitPct).div(100);
+    tpUsd =
+      input.side === 'BUY'
+        ? entry.mul(new Prisma.Decimal(1).plus(frac))
+        : entry.mul(new Prisma.Decimal(1).minus(frac));
+  }
+  if (input.stopLossPct != null && input.stopLossPct > 0) {
+    const frac = new Prisma.Decimal(input.stopLossPct).div(100);
+    slUsd =
+      input.side === 'BUY'
+        ? entry.mul(new Prisma.Decimal(1).minus(frac))
+        : entry.mul(new Prisma.Decimal(1).plus(frac));
+  }
   const pos: DemoPositionRow = {
     id: nextId(state, 'demo_pos_'),
     userId: state.userId,
@@ -604,6 +700,21 @@ export function demoOpenPosition(
     entryPriceUsd: entry.toString(),
     notionalUsd: notional.toString(),
     pnlStable: '0',
+    takeProfitPct:
+      input.takeProfitPct != null && input.takeProfitPct > 0
+        ? String(input.takeProfitPct)
+        : null,
+    stopLossPct:
+      input.stopLossPct != null && input.stopLossPct > 0
+        ? String(input.stopLossPct)
+        : null,
+    takeProfitUsd: tpUsd ? tpUsd.toString() : null,
+    stopLossUsd: slUsd ? slUsd.toString() : null,
+    closeReason: null,
+    expiresAt:
+      input.expiresInHours != null && input.expiresInHours > 0
+        ? new Date(now.getTime() + input.expiresInHours * 3600_000)
+        : null,
     openedAt: now,
     createdAt: now,
   };
@@ -627,7 +738,8 @@ export function demoClosePosition(
   state: DemoState,
   positionId: string,
   exitPrice: number,
-  now?: Date
+  now?: Date,
+  reason = 'user_close'
 ): DemoPositionRow {
   const pos = state.positions.find((p) => p.id === positionId);
   if (!pos) throw new NotFoundError('Position not found');
@@ -654,7 +766,62 @@ export function demoClosePosition(
   }
   pos.status = 'CLOSED';
   pos.pnlStable = netPnl.toString();
+  pos.closeReason = reason;
   return pos;
+}
+
+/**
+ * Close demo positions whose TP/SL levels the marks have crossed (or whose
+ * expiry passed). Mirrors the live beginner monitor. Evaluated lazily on
+ * demo position reads — the monitor only reads the DB, never demo state.
+ */
+export function settleDemoPositionTriggers(
+  state: DemoState,
+  priceOf: (key: string) => number | null,
+  now?: Date
+): DemoPositionRow[] {
+  const closed: DemoPositionRow[] = [];
+  const at = now ?? new Date();
+  for (const p of state.positions) {
+    if (p.status !== 'OPEN') continue;
+    const key = p.assetTokenId
+      ? `token:${p.assetTokenId}`
+      : `native:${p.assetNetworkId}`;
+    const mark = priceOf(key);
+    if (p.expiresAt && new Date(p.expiresAt).getTime() <= at.getTime()) {
+      if (!mark || !(mark > 0)) continue;
+      try {
+        closed.push(demoClosePosition(state, p.id, mark, at, 'expired'));
+      } catch {
+        /* leave open */
+      }
+      continue;
+    }
+    if (!p.takeProfitUsd && !p.stopLossUsd) continue;
+    if (!mark || !(mark > 0)) continue;
+    const px = new Prisma.Decimal(mark);
+    let reason: string | null = null;
+    if (p.side === 'BUY') {
+      if (p.takeProfitUsd && px.gte(new Prisma.Decimal(p.takeProfitUsd))) {
+        reason = 'take_profit';
+      } else if (p.stopLossUsd && px.lte(new Prisma.Decimal(p.stopLossUsd))) {
+        reason = 'stop_loss';
+      }
+    } else {
+      if (p.takeProfitUsd && px.lte(new Prisma.Decimal(p.takeProfitUsd))) {
+        reason = 'take_profit';
+      } else if (p.stopLossUsd && px.gte(new Prisma.Decimal(p.stopLossUsd))) {
+        reason = 'stop_loss';
+      }
+    }
+    if (!reason) continue;
+    try {
+      closed.push(demoClosePosition(state, p.id, mark, at, reason));
+    } catch {
+      /* leave open */
+    }
+  }
+  return closed;
 }
 
 /** Recompute OPEN unrealized PnL from live marks (gross, no exit commission). */
@@ -710,7 +877,7 @@ export function demoSetEmergency(
     dropPct: drop.toString(),
     stableTokenByNetwork:
       input.stableTokenByNetwork ??
-      state.emergency?.stableTokenByNetwork ?? { ...DEFAULT_STABLE_BY_NETWORK },
+      state.emergency?.stableTokenByNetwork ?? defaultEmergencyStables(),
     watchTokenIds:
       input.watchTokenIds ?? state.emergency?.watchTokenIds ?? [],
     updatedAt: input.now ?? new Date(),

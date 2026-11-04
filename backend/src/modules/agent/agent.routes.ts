@@ -9,7 +9,6 @@ import { createRateLimiter } from '../../middleware/rateLimit.middleware';
 import { agentAuth } from './gateway/auth.middleware';
 import { policyMiddleware } from './policy.middleware';
 import * as controller from './agent.controller';
-import agentKeyRoutes from './gateway/agentKey.routes';
 import { agentDemoGuard } from './agentDemoGuard';
 import config from '../../config';
 import { getRedis } from '../../lib/redis';
@@ -27,7 +26,7 @@ const agentLimiter = createRateLimiter({
 
 /**
  * Per-principal crew-run quota (F3). The edge limiter is per-IP; this one
- * keys by (user, key-or-JWT) so one principal cannot burn the shared model
+ * keys by user so one principal cannot burn the shared model
  * budget / crew fan-out from many IPs. Runs after agentAuth.
  */
 const AGENT_RUN_WINDOW_MS = 5 * 60_000;
@@ -38,7 +37,7 @@ async function agentRunLimiter(req: Request, _res: Response, next: NextFunction)
     if (!p) return next();
     const r = getRedis();
     if (!r) return next();
-    const key = `agrun:${p.userId}:${p.agentKeyId || 'jwt'}`;
+    const key = `agrun:${p.userId}`;
     const count = await r.incr(key);
     if (count === 1) await r.pexpire(key, AGENT_RUN_WINDOW_MS);
     if (count > AGENT_RUN_MAX) {
@@ -57,14 +56,21 @@ router.get('/health', controller.health);
 // guard also exempts GET /health explicitly, so this is order-independent).
 router.use(agentDemoGuard);
 
-// AgentKey management (user JWT only)
-router.use('/keys', agentKeyRoutes);
-
 // Audit timeline for the UI (owner-scoped)
 router.get('/actions/:id', agentLimiter, agentAuth, controller.actionTimeline);
 
+// Conversation threads + durable memory (owner-scoped)
+router.get('/threads', agentLimiter, agentAuth, controller.threads);
+router.get('/threads/:id', agentLimiter, agentAuth, controller.threadDetail);
+router.get('/memory', agentLimiter, agentAuth, controller.memory);
+router.put('/memory', agentLimiter, agentAuth, controller.updateMemoryHandler);
+
 // Streaming crew run for the UI/demo (SSE)
 router.post('/stream', agentLimiter, agentAuth, agentRunLimiter, controller.stream);
+
+// Gated execution: proposal → approve → execute (human confirmation required)
+router.post('/execute', agentLimiter, agentAuth, agentRunLimiter, controller.execute);
+router.get('/executions/:id', agentLimiter, agentAuth, controller.executionStatus);
 
 // Muse capabilities
 router.post(

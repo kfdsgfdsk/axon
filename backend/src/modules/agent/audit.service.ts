@@ -18,21 +18,23 @@ import { capText, redactValue } from './transcript/redact';
 
 export async function createAgentAction(input: {
   userId: string;
-  agentKeyId?: string;
   capability: MuseCapability;
   dryRun: boolean;
   requestSummary: string;
   meta?: Record<string, unknown>;
+  threadId?: string | null;
+  parentActionId?: string | null;
 }): Promise<{ id: string }> {
   // Redact at the write boundary (S-H2): pasted secrets must never persist.
   const row = await prisma.agentAction.create({
     data: {
       userId: input.userId,
-      agentKeyId: input.agentKeyId || null,
       capability: input.capability,
       dryRun: input.dryRun,
       status: 'STARTED',
       requestSummary: capText(input.requestSummary, 2000).text,
+      threadId: input.threadId || null,
+      parentActionId: input.parentActionId || null,
       meta: (redactValue(input.meta || {}).value || {}) as object,
     },
     select: { id: true },
@@ -104,7 +106,6 @@ export async function recordAuditEvent(event: AuditEvent): Promise<void> {
       data: {
         type: event.type,
         userId: event.userId,
-        agentKeyId: event.agentKeyId || null,
         actionId: event.actionId || null,
         capability: event.capability || null,
         message: capText(event.message, 2000).text,
@@ -123,7 +124,6 @@ export async function recordAuditEvent(event: AuditEvent): Promise<void> {
 export async function logToolCall(
   actionId: string,
   userId: string,
-  agentKeyId: string | undefined,
   toolName: string,
   ok: boolean,
   durationMs: number,
@@ -132,7 +132,6 @@ export async function logToolCall(
   await recordAuditEvent({
     type: ok ? 'TOOL_RESULT' : 'TOOL_CALL',
     userId,
-    agentKeyId,
     actionId,
     message: `tool=${toolName} ok=${ok} durationMs=${durationMs}${error ? ` error=${error}` : ''}`,
     meta: { toolName, ok, durationMs, error },
@@ -142,13 +141,11 @@ export async function logToolCall(
 export async function logPolicyDecision(
   actionId: string,
   userId: string,
-  agentKeyId: string | undefined,
   decision: PolicyDecision
 ): Promise<void> {
   await recordAuditEvent({
     type: 'POLICY_DECISION',
     userId,
-    agentKeyId,
     actionId,
     message: `policy=${decision.kind} reasons=${decision.reasons.join('; ')}`,
     meta: { kind: decision.kind, reasons: decision.reasons, constraints: decision.constraints },

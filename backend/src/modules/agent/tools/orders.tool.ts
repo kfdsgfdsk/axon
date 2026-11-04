@@ -9,7 +9,6 @@ import { listOrders } from '../../trading/trade.service';
 import prisma from '../../../lib/prisma';
 import type { ToolContext, ToolResult } from '../types';
 import { ordersToolParamsSchema } from '../schemas';
-import { ForbiddenError } from '../../../utils/errors';
 
 export async function ordersTool(
   params: Record<string, unknown>,
@@ -84,9 +83,6 @@ export async function ordersTool(
     }
 
     // list
-    if (!ctx.principal.scopes.includes('read') && !ctx.principal.scopes.includes('trade')) {
-      throw new ForbiddenError('orders tool requires read or trade scope');
-    }
     const orders = await listOrders(ctx.principal.userId, take ?? 50);
     return {
       toolCallId: '',

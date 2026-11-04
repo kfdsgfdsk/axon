@@ -44,6 +44,7 @@ export async function buildPortfolioContext(
     updatedAt: b.updatedAt ? b.updatedAt.toISOString() : null,
     markUsd: null,
     markStale: true,
+    markUpdatedAt: null,
     valueUsd: null,
     weightPct: null,
   }));
@@ -65,10 +66,12 @@ export async function buildPortfolioContext(
         const qty = toNumber(b.available) + toNumber(b.locked);
         b.markUsd = meta.price;
         b.markStale = meta.stale;
+        b.markUpdatedAt = meta.updatedAt;
         b.valueUsd = Number((qty * meta.price).toFixed(2));
       } else {
         b.markUsd = null;
         b.markStale = true;
+        b.markUpdatedAt = null;
         b.valueUsd = null;
       }
     }

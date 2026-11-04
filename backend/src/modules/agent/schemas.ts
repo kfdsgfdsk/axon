@@ -7,21 +7,11 @@
  *
  * KEY SECURITY & DESIGN CONSTRAINTS
  * ---------------------------------
- * - Agent Key scopes are only "read" | "trade" — never "withdraw".
  * - dryRun defaults to true.
  * - Treat all model output as untrusted until schema-validated.
  */
 
 import { z } from 'zod';
-
-export const agentKeyScopeSchema = z.enum(['read', 'trade']);
-
-export const createAgentKeySchema = z.object({
-  name: z.string().min(1).max(64),
-  scopes: z.array(agentKeyScopeSchema).min(1).max(2),
-  /** Optional ISO expiry; omit for non-expiring keys. */
-  expiresAt: z.string().datetime().optional(),
-});
 
 export const agentChatSchema = z.object({
   message: z.string().min(1).max(4000),
@@ -89,7 +79,12 @@ export const crewModeSchema = z.enum(['fast', 'deep']);
 
 /** SSE streaming request. */
 export const agentStreamSchema = z.object({
-  capability: museCapabilitySchema.default('reactive'),
+  /**
+   * Optional: when omitted the server infers the desk mode from `message`
+   * (AI-first with a deterministic rules fallback — see
+   * capability.inferCapabilitySmart). An explicit value always wins.
+   */
+  capability: museCapabilitySchema.optional(),
   message: z.string().min(1).max(4000),
   dryRun: z.boolean().optional().default(true),
   live: z.boolean().optional().default(false),
@@ -101,6 +96,37 @@ export const agentStreamSchema = z.object({
    * live execution is impossible on a demo run.
    */
   demo: z.boolean().optional().default(false),
+  /**
+   * Conversation thread to continue (opaque id). Absent = start a new
+   * thread for this run; the server returns its id for follow-ups.
+   */
+  threadId: z.string().min(1).max(64).optional(),
+  /**
+   * Prior action to follow up on. When it resolves (ownership-checked),
+   * the crew skips Scout and refines the previous proposal instead of
+   * cold-starting. Unknown/foreign ids are ignored (fresh path).
+   */
+  followUpActionId: z.string().min(1).max(64).optional(),
+});
+
+/** Durable per-user agent memory (model reads it; only the user writes it). */
+export const agentMemorySchema = z.object({
+  riskTolerance: z.enum(['conservative', 'moderate', 'aggressive']).optional(),
+  preferredAssets: z.array(z.string().min(1).max(32)).max(20).optional(),
+  preferredNetworks: z.array(z.string().min(1).max(32)).max(20).optional(),
+  notes: z.string().max(1000).nullable().optional(),
+});
+
+/** Human-confirmed execution of one proposal action. */
+export const agentExecuteSchema = z.object({
+  actionId: z.string().min(1).max(64),
+  actionIndex: z.number().int().min(0).max(9),
+  /**
+   * Explicit human confirmation. Must be the literal "EXECUTE" plus the
+   * proposal id tail, e.g. "EXECUTE abc123" — typing it is the consent.
+   */
+  confirmation: z.string().min(8).max(128),
+  idempotencyKey: z.string().min(8).max(128),
 });
 
 export const agentCritiqueSchema = z.object({

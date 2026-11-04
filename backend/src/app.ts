@@ -1,6 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import { trustSingleProxy } from './middleware/proxy';
 import { userRateLimit, createRateLimiter } from './middleware/rateLimit.middleware';
 import { errorHandler, bodyParserErrorHandler } from './middleware/errorHandler.middleware';
 import { issueCsrfToken } from './middleware/csrf.middleware';
@@ -26,6 +27,10 @@ import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './swagger';
 
 const app = express();
+
+// Single proxy hop (nginx liaison) in every environment — must precede the
+// rate limiters so req.ip is the real client IP (see middleware/proxy.ts).
+trustSingleProxy(app);
 
 app.use(helmet({
   // Useful defaults; CSP can be tightened further behind a reverse proxy
@@ -73,11 +78,6 @@ app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 // Map body-parser failures to operational statuses (S-M9): malformed JSON →
 // 400, oversized → 413. Without this they fall through to the 500 handler.
 app.use(bodyParserErrorHandler);
-
-// Trust first proxy (needed for correct req.ip behind nginx / load balancer)
-if (config.isProdLike) {
-  app.set('trust proxy', 1);
-}
 
 /**
  * @openapi

@@ -52,10 +52,12 @@ model User {
   passwordResetTokens    PasswordResetToken[]
   emailVerifyTokens      EmailVerifyToken[]
   idempotencyRecords     IdempotencyRecord[]
-  agentKeys              AgentKey[]
   agentActions           AgentAction[]
   agentAuditEvents       AgentAuditEvent[]
   agentTranscriptEntries AgentTranscriptEntry[]
+  agentThreads           AgentThread[]
+  agentMemory            AgentMemory?
+  agentExecutions        AgentExecution[]
 }
 
 /// Supported fungible tokens (ERC-20 / SPL). Admin-managed; seed via script.
@@ -839,34 +841,10 @@ model ApprovalGrant {
 // AI Agent / Muse layer
 // ---------------------------------------------------------------------------
 
-/// Machine credentials for the Agent Gateway. Scopes: read | trade only.
-model AgentKey {
-  id         String    @id @default(cuid())
-  userId     String
-  name       String
-  /// sha256 hex of the raw secret (ak_…)
-  keyHash    String    @unique
-  /// First 8 chars of the secret for display
-  keyPrefix  String
-  scopes     String[]
-  expiresAt  DateTime?
-  revokedAt  DateTime?
-  lastUsedAt DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-
-  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  actions AgentAction[]
-
-  @@index([userId, revokedAt])
-  @@index([keyHash])
-}
-
 /// One row per Muse interaction (chat / copilot / plan / strategy / critique).
 model AgentAction {
   id              String    @id @default(cuid())
   userId          String
-  agentKeyId      String?
   capability      String
   dryRun          Boolean   @default(true)
   status          String    @default("STARTED") // STARTED | COMPLETED | FAILED | DENIED
@@ -874,17 +852,79 @@ model AgentAction {
   responseSummary String?
   policyKind      String?
   proposalId      String?
+  /// Owning conversation thread (null = legacy single-shot run).
+  threadId        String?
+  /// Prior action this run follows up on (null = fresh run).
+  parentActionId  String?
   meta            Json?
   createdAt       DateTime  @default(now())
   completedAt     DateTime?
 
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  agentKey AgentKey? @relation(fields: [agentKeyId], references: [id], onDelete: SetNull)
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  thread   AgentThread? @relation(fields: [threadId], references: [id], onDelete: SetNull)
 
   @@index([userId, createdAt])
-  @@index([agentKeyId, createdAt])
   @@index([capability, createdAt])
   @@index([status, createdAt])
+  @@index([threadId, createdAt])
+}
+
+/// A conversation thread: an ordered chain of crew runs (fresh + follow-ups).
+/// The thread owns no money semantics — it only groups AgentAction rows so a
+/// follow-up can reuse the previous proposal + turns as context.
+model AgentThread {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String   @default("New deliberation")
+  summary   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actions AgentAction[]
+
+  @@index([userId, updatedAt])
+}
+
+/// Durable per-user agent memory: preferences the crew injects as context.
+/// Written only via explicit user updates or confirmed run outcomes — never by
+/// the model directly. Fully redacted at the write boundary like transcripts.
+model AgentMemory {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  riskTolerance    String   @default("moderate") // conservative | moderate | aggressive
+  preferredAssets  String[] @default([])
+  preferredNetworks String[] @default([])
+  notes            String?
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+/// One row per human-confirmed proposal execution. The receipt that proves
+/// "this ran under policy X with confirmation Y". Idempotency key is unique
+/// per user so replays return the original row instead of double-executing.
+model AgentExecution {
+  id             String   @id @default(cuid())
+  userId         String
+  actionId       String
+  proposalId     String
+  actionIndex    Int
+  actionType     String
+  idempotencyKey String
+  status         String   @default("PENDING") // PENDING | SUBMITTED | FILLED | FAILED | REJECTED
+  orderId        String?
+  confirmation   String?
+  policyKind     String?
+  detail         Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt])
+  @@index([actionId])
 }
 
 /// Structured audit events for the agent layer.
@@ -892,7 +932,6 @@ model AgentAuditEvent {
   id         String   @id @default(cuid())
   type       String
   userId     String
-  agentKeyId String?
   actionId   String?
   capability String?
   message    String
@@ -904,7 +943,6 @@ model AgentAuditEvent {
   @@index([userId, createdAt])
   @@index([actionId])
   @@index([type, createdAt])
-  @@index([agentKeyId, createdAt])
 }
 
 /// Full-fidelity per-run transcript for the Muse crew (see transcript.service).
@@ -916,7 +954,6 @@ model AgentTranscriptEntry {
   id         String   @id @default(cuid())
   actionId   String
   userId     String
-  agentKeyId String?
   capability String?
   mode       String?
   seq        Int

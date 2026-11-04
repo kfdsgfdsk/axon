@@ -163,3 +163,10 @@
   font-size: 13px;
   font-weight: 700;
 }
+
+.bracket-chart { display: grid; gap: 8px; }
+.bracket-readout {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline;
+  font-size: 11.5px;
+}
+.bracket-chart svg text { user-select: none; }

@@ -6,12 +6,13 @@
  * Muse never moves money from this layer.
  */
 
-import { orchestrate } from './muse.orchestrator';
+import { orchestrate, refuseFast } from './muse.orchestrator';
 import type {
   AgentPrincipal,
   AgentServiceResult,
   CrewEvent,
   CrewMode,
+  IntentBrief,
   MuseCapability,
   PolicyDecision,
   Proposal,
@@ -40,7 +41,15 @@ export async function runWithEvents(
   userMessage: string,
   dryRun: boolean,
   policy: PolicyDecision,
-  opts?: { mode?: CrewMode; onEvent?: (event: CrewEvent) => void; demoBook?: boolean }
+  opts?: {
+    mode?: CrewMode;
+    onEvent?: (event: CrewEvent) => void;
+    demoBook?: boolean;
+    threadId?: string | null;
+    followUp?: { parentActionId: string; block: string } | null;
+    memoryBlock?: string;
+    intentBrief?: IntentBrief | null;
+  }
 ): Promise<AgentServiceResult> {
   return orchestrate({
     principal,
@@ -51,6 +60,29 @@ export async function runWithEvents(
     mode: opts?.mode,
     onEvent: opts?.onEvent,
     demoBook: opts?.demoBook,
+    threadId: opts?.threadId,
+    followUp: opts?.followUp,
+    memoryBlock: opts?.memoryBlock,
+    intentBrief: opts?.intentBrief,
+  });
+}
+
+/** Instant deterministic refusal for the SSE streaming endpoint. */
+export async function runSafetyRefusalWithEvents(
+  principal: AgentPrincipal,
+  capability: MuseCapability,
+  userMessage: string,
+  opts?: {
+    onEvent?: (event: CrewEvent) => void;
+    threadId?: string | null;
+  }
+): Promise<AgentServiceResult> {
+  return refuseFast({
+    principal,
+    capability,
+    userMessage,
+    threadId: opts?.threadId,
+    onEvent: opts?.onEvent,
   });
 }
 

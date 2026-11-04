@@ -5,6 +5,8 @@ import { useBalances, useModeData } from '../../lib/data';
 import { useToast } from '../../lib/toast';
 import { fmtAddr, fmtDateTime, fmtNum, symbolOf } from '../../lib/format';
 import { Badge, Button, Card, Empty, Field, Skeleton, statusTone } from '../../ui/primitives';
+import { AskDesk, usePublishDockContext } from '../../ui/AskDesk';
+import type { AskSuggestion } from '../../ui/AskDesk';
 import type { Withdrawal } from '../../lib/types';
 
 const NETWORKS = ['ethereum', 'solana', 'bitcoin', 'tron', 'solana-devnet'];
@@ -47,6 +49,13 @@ export function WithdrawalsPage() {
   const tokenId = tok === 'native' || net === 'solana-devnet' ? null : `usdt-${net}`;
   const bal = (balances || []).find((b) => b.networkId === net && (b.tokenId || '') === (tokenId || ''));
   const sym = symbolOf(net, tokenId);
+
+  // First chip carries the user's actual form (asset, network, destination).
+  const firstSuggestion: AskSuggestion = {
+    label: 'Is this address safe?',
+    prompt: `Read-only advice only — do not move anything. I am about to withdraw ${sym} on ${net}${to.trim() ? ` to ${to.trim()}` : ''}. Walk me through verifying the destination: format, network match, whitelist, and test-send practice.`,
+  };
+  usePublishDockContext(firstSuggestion);
 
   const submit = async () => {
     if (!confirm) { setConfirm(true); return; }
@@ -97,6 +106,12 @@ export function WithdrawalsPage() {
             <Field label="Destination address" hint="Must be whitelisted if you enabled address lockdown">
               <input value={to} onChange={(e) => setTo(e.target.value)} placeholder="0x… / base58…" spellCheck={false} />
             </Field>
+            <AskDesk
+              suggestions={[
+                firstSuggestion,
+                { label: 'Withdrawal checklist', prompt: 'Read-only advice only — do not move anything. Give me a withdrawal safety checklist: address checks, network match, amounts, 2FA, and approval flow.' },
+              ]}
+            />
             <Field label={`Amount (${sym})`} hint={`Available: ${bal ? fmtNum(bal.available) : '—'} ${sym}`}>
               <input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" placeholder="0.00" />
             </Field>

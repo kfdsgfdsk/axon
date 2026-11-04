@@ -64,8 +64,6 @@ const mockExecTool = executeTool as jest.MockedFunction<typeof executeTool>;
 
 const principal: AgentPrincipal = {
   userId: 'user-crew',
-  agentKeyId: 'ak-crew',
-  scopes: ['read', 'trade'],
 };
 
 const dryPolicy: PolicyDecision = { kind: 'DRY_RUN', reasons: ['default'] };
@@ -172,7 +170,6 @@ describe('runCrew — multi-agent pipeline', () => {
     expect(mockCreateAction).toHaveBeenCalledWith(
       expect.objectContaining({
         userId: 'user-crew',
-        agentKeyId: 'ak-crew',
         capability: 'copilot',
         dryRun: true,
       })
@@ -187,7 +184,7 @@ describe('runCrew — multi-agent pipeline', () => {
     expect(mockFinalize).toHaveBeenCalled();
   });
 
-  test('loads portfolio context once for the crew', async () => {
+  test('loads portfolio context for the opening snapshot and the pre-verification refresh', async () => {
     await runCrew({
       principal,
       capability: 'reactive',
@@ -195,8 +192,11 @@ describe('runCrew — multi-agent pipeline', () => {
       dryRun: true,
       policy: dryPolicy,
     });
+    // Twice per run by design: the opening snapshot the crew debates from,
+    // plus a fresh read right before deterministic verification so sizing is
+    // judged on current marks — not on wall-clock age from the debate.
     expect(mockPortfolio).toHaveBeenCalledWith('user-crew');
-    expect(mockPortfolio).toHaveBeenCalledTimes(1);
+    expect(mockPortfolio).toHaveBeenCalledTimes(2);
   });
 
   test('proposal extraction prefers judge content and captures red-team risks', async () => {

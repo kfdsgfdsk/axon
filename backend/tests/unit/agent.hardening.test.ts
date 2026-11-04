@@ -3,7 +3,6 @@
  *  S-H2  audit writes redacted at the boundary (summaries + meta)
  *  F10   BIP-39 12-word runs redacted; nested <untrusted> escaped
  *  F6    ALLOW without idempotencyKey downgraded to DENY
- *  F9    AgentKey expiry/cap enforced; peppered hashing with legacy fallback
  *  F14   CANCEL_ORDER for unowned orders dropped
  */
 
@@ -12,12 +11,6 @@ jest.mock('../../src/lib/prisma', () => ({
   default: {
     agentAction: { create: jest.fn(), update: jest.fn() },
     agentAuditEvent: { create: jest.fn() },
-    agentKey: {
-      create: jest.fn(),
-      findFirst: jest.fn(),
-      count: jest.fn(),
-      update: jest.fn(async () => ({})),
-    },
   },
 }));
 
@@ -47,10 +40,6 @@ import { createAgentAction, recordAuditEvent } from '../../src/modules/agent/aud
 import { redactBip39Runs } from '../../src/modules/agent/transcript/redact';
 import { sanitizeUntrusted } from '../../src/modules/agent/safety';
 import { policyMiddleware } from '../../src/modules/agent/policy.middleware';
-import {
-  createAgentKey,
-  verifyAgentKey,
-} from '../../src/modules/agent/gateway/agentKey.service';
 import { verifyProposal } from '../../src/modules/agent/crew/verifyProposal';
 
 const prismaMock = prisma as unknown as Record<string, Record<string, jest.Mock>>;
@@ -96,7 +85,7 @@ describe('F10 seed + delimiter hardening', () => {
 });
 
 describe('F6 ALLOW requires idempotencyKey', () => {
-  const principal: any = { userId: 'u1', scopes: ['read', 'trade'] };
+  const principal: any = { userId: 'u1' };
   const run = (body: any) =>
     new Promise<{ err: any }>((resolve) => {
       const req: any = { agentPrincipal: principal, body };
@@ -112,60 +101,6 @@ describe('F6 ALLOW requires idempotencyKey', () => {
   test('live with key → ALLOW passes', async () => {
     const { err } = await run({ dryRun: false, live: true, idempotencyKey: 'key-12345' });
     expect(err).toBeFalsy();
-  });
-});
-
-describe('F9 AgentKey hygiene', () => {
-  test('past expiry rejected', async () => {
-    prismaMock.agentKey.count.mockResolvedValue(0);
-    await expect(
-      createAgentKey({
-        userId: 'u1',
-        name: 'k',
-        scopes: ['read'],
-        expiresAt: new Date(Date.now() - 1000),
-      })
-    ).rejects.toThrow(/future/);
-  });
-
-  test('per-user cap enforced', async () => {
-    prismaMock.agentKey.count.mockResolvedValue(20);
-    await expect(
-      createAgentKey({ userId: 'u1', name: 'k', scopes: ['read'] })
-    ).rejects.toThrow(/limit reached/);
-  });
-
-  test('peppered round-trip verifies; legacy rows still verify', async () => {
-    prismaMock.agentKey.count.mockResolvedValue(0);
-    const crypto = jest.requireActual('crypto') as typeof import('crypto');
-    const peppered = (s: string) =>
-      crypto.createHmac('sha256', 'test-pepper-1234567890').update(s, 'utf8').digest('hex');
-    const legacy = (s: string) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
-
-    let storedHash = '';
-    prismaMock.agentKey.create.mockImplementation(async (args: any) => {
-      storedHash = args.data.keyHash;
-      return { id: 'k1', name: 'k', scopes: ['read'], expiresAt: null };
-    });
-    const created = await createAgentKey({ userId: 'u1', name: 'k', scopes: ['read'] });
-    expect(storedHash).toBe(peppered(created.key));
-
-    prismaMock.agentKey.findFirst.mockImplementation(async (args: any) =>
-      args.where.keyHash === storedHash
-        ? { id: 'k1', userId: 'u1', scopes: ['read'], expiresAt: null, revokedAt: null }
-        : null
-    );
-    const v = await verifyAgentKey(created.key);
-    expect(v?.agentKeyId).toBe('k1');
-
-    // Legacy (pre-pepper) row
-    prismaMock.agentKey.findFirst.mockImplementation(async (args: any) =>
-      args.where.keyHash === legacy('ak_legacysecret')
-        ? { id: 'k0', userId: 'u1', scopes: ['read'], expiresAt: null, revokedAt: null }
-        : null
-    );
-    const v0 = await verifyAgentKey('ak_legacysecret');
-    expect(v0?.agentKeyId).toBe('k0');
   });
 });
 

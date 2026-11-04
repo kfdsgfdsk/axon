@@ -1,7 +1,7 @@
 /**
  * PURPOSE
  * -------
- * Muse tool that returns current balances for the authenticated user / AgentKey.
+ * Muse tool that returns current balances for the authenticated user.
  * Purely read-only.
  */
 

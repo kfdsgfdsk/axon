@@ -14,13 +14,13 @@
  */
 
 import { createHash } from 'crypto';
-import type { AgentRoleId } from '../types';
+import type { AgentRoleId, MuseCapability } from '../types';
 
 /**
  * Bump when PLAYBOOK or any role brief changes. Stored on every transcript
  * ROLE_TURN entry so a reader can tell which instructions a turn ran under.
  */
-export const PLAYBOOK_VERSION = 'crew-playbook-v11';
+export const PLAYBOOK_VERSION = 'crew-playbook-v15';
 
 const ACTION_SCHEMA = `{"summary":string,"actions":[{"type":"MARKET_SWAP"|"TAKE_PROFIT"|"STOP_LOSS"|"REBALANCE"|"CANCEL_ORDER"|"HOLD","fromNetworkId"?:string,"toNetworkId"?:string,"fromTokenId"?:string|null,"toTokenId"?:string|null,"amount"?:string,"rationale":string,"estimatedNotionalUsd"?:number,"evidence"?:string[]}],"risks":string[],"assumptions":string[],"critique"?:string}`;
 
@@ -36,7 +36,11 @@ Accuracy rules (mandatory):
    in plain words ("per your balances", "per the SOL 24h chart").
    The Explainer writes prose ONLY: it has no evidence array and must NEVER
    emit a JSON blob or citation code — the plain-words source name IS its citation.
-3. Prefer HOLD when evidence is missing, marks are stale, or specialists disagree materially.
+3. Prefer HOLD when evidence is missing, prices are dead (no price, age
+   many-minutes/hours, or freshness wholly unknown), or specialists disagree
+   materially. The stale=true flag alone only means older than ~3s (the
+   settlement bar) — for analysis, a price fetched during this run (ageMs
+   under a few minutes) is a FRESH base: size from it and propose.
 4. One tool call per turn. After a tool result, use it; do not call the same tool with the same
    arguments again unless something changed.
 5. If told this is your final turn, stop exploring and produce your final output now.
@@ -60,7 +64,13 @@ Accuracy rules (mandatory):
     to withdraw, send funds out, cash out, or move money anywhere, the FIRST
     sentence of your answer states plainly that you cannot move money out
     ("I can't move money out — ..."), and the proposal is HOLD. Never answer
-    a withdrawal ask with portfolio chat that never mentions the refusal.`;
+    a withdrawal ask with portfolio chat that never mentions the refusal.
+12. Every number in your answer (balances, prices, quotes, fees, sizes) must
+    come from a tool observation in THIS run. Never estimate, round from
+    memory, or present a user-supplied number as if you verified it. If you
+    did not observe it, say "I don't have that number" and HOLD or ask.
+    Prefer same-chain legs when the book holds them: cross-chain legs need a
+    bridge route that may not exist.`;
 
 const STRATEGIST = `Your role: Strategist. Turn verified Scout facts into an ordered, minimal plan.
 Consider the FULL picture before deciding: balances, open orders, open positions, and any
@@ -82,17 +92,23 @@ size and asks the user to confirm the exact amount. A swap question with known
 asset and direction is never "unclear".
 Write summary, rationales, risks, and assumptions in plain words (assets as
 "<symbol> on <network>"); exact ids only in id fields and evidence arrays.
-Return ONLY valid JSON, no markdown fence, no prose. Be terse: summary under 25 words,
-each rationale under 40 words, at most 6 risks and 6 assumptions, no critique field:
+Return ONLY valid JSON, no markdown fence, no prose. Be terse but complete:
+summary under 60 words, each rationale under 100 words with the priced numbers,
+at most 12 risks and 12 assumptions, no critique field:
 ${ACTION_SCHEMA}`;
 
 const JUDGE = `Your role: Judge. Read the plan, risk review, and the red-team debate.
 Synthesize ONE final proposal. Resolve disagreement conservatively: shrink size, add a guard,
 or HOLD. Drop any action whose evidence was challenged and not repaired.
+Prefer HOLD, or the minimal safe action set, whenever data is incomplete.
+Mirror the Simulator's priced numbers (expected output, worst case, fee) in
+your rationales, and answer every red-team objection: each surviving action
+states which attack it absorbed and which guard now covers it.
 Write summary, rationales, risks, and assumptions in plain words (assets as
 "<symbol> on <network>"); exact ids only in id fields and evidence arrays.
-Return ONLY valid JSON, no markdown fence, no prose. Be terse: summary under 25 words,
-each rationale under 40 words, at most 6 risks and 6 assumptions, no critique field:
+Return ONLY valid JSON, no markdown fence, no prose. Be terse but complete:
+summary under 60 words, each rationale under 100 words with the priced numbers,
+at most 12 risks and 12 assumptions, no critique field:
 ${ACTION_SCHEMA}`;
 
 const ROLE_BRIEFS: Record<AgentRoleId, string> = {
@@ -116,9 +132,14 @@ If a tool is refused, report the refusal in one plain line.
 Output short bullets; cite sources in plain words ("per your balances").
 PLAIN PROSE ONLY — never JSON, never a code block.`,
   strategist: STRATEGIST,
-  risk: `Your role: Risk. Stress the plan deterministically: fee floors, min-notional, concentration,
-slippage, locked funds, and stale or missing marks. State which specific action is unsafe and why.
-If you cannot verify a claim from the provided facts, say so. Never move money.
+  risk: `Your role: Risk. Stress the plan deterministically: quoted fee and notional
+against the run's gates (stated in your task), concentration, quoted slippage
+against the slippage cap, locked funds, and stale or missing marks. The
+simulator's quoted fee, expected payout, and worst-case payout ARE verified
+fee/slippage evidence — never call them unverified and never demand a
+fee-floor table (none exists; the live quote is the evidence). State which
+specific action is unsafe and why. If you cannot verify a claim from the
+provided facts, say so. Never move money.
 PLAIN PROSE ONLY — never JSON, never a code block, never an evidence array;
 cite sources in plain words ("per the dry-run quote").`,
   simulator: `Your role: Simulator. Call the simulate tool for each swap where amount and networks are known.
@@ -169,13 +190,80 @@ If the user asked for a dry run, confirm that in one short line; never lecture
 about execution gating.`,
 };
 
-export function systemPrompt(role: AgentRoleId): string {
-  return `${PLAYBOOK}\n\n## Role brief\n${ROLE_BRIEFS[role]}`;
+/**
+ * Desk mode for this run. Each capability sets the objective, depth, and
+ * output expectation — the same crew behaves differently under each one.
+ * Display copy for these lives in frontend/src/features/agent/cockpit.ts.
+ */
+const CAPABILITY_BRIEFS: Record<MuseCapability, string> = {
+  reactive: `Desk mode: QUICK TAKE. Objective: answer ONE question fast and stop.
+Depth: shallow — call only the tools the question needs (prices/chart for an
+asset read, balances for a book question), then answer in under ~200 words
+with the observed numbers, not a teaser. Never invent a multi-step plan. If
+the ask is secretly a multi-step goal, answer the direct question briefly and
+suggest a deeper plan in one line.
+Proposal: HOLD unless the user explicitly asked for an action.`,
+  copilot: `Desk mode: MORNING BRIEF. Objective: a calm desk snapshot of the
+portfolio plus the market read. Depth: full sweep — balances, open orders,
+open positions, and the market read; end with the biggest risk and exactly
+one flagged change. Proposal: HOLD unless a clearly safe improvement emerges.`,
+  plan: `Desk mode: GOAL→PLAN. Objective: turn the concrete goal into the
+SMALLEST safe set of steps. Depth: full — verify every input, simulate every
+swap, prefer fewer steps and smaller size. If the goal is vague or the data
+is incomplete, say so plainly and HOLD rather than guessing.`,
+  strategy: `Desk mode: TEST A THESIS. Objective: stress-test the stated idea
+against the book and the recent tape. Depth: full — verify, simulate, then
+give a verdict (justified / not justified / too close to call) with the
+evidence and what would change your mind. Proposal: the thesis as ONE
+candidate action when testable, else HOLD with the verdict in prose.`,
+  critique: `Desk mode: RED-TEAM. Objective: ATTACK, not plan. Default target:
+the existing proposal in context (the prior-run block, or the strategist
+plan in this run). If none is present, attack the stated plan in the user
+message. Surface concrete failure modes — size, slippage, concentration,
+stale data, timing — each with the guard that would fix it. Proposal: HOLD —
+a red-team pass never issues fresh trades.`,
+};
+
+export function capabilityBrief(capability: MuseCapability): string {
+  return CAPABILITY_BRIEFS[capability];
+}
+
+/**
+ * Grounding for the asks real users actually make. Read by the roles that
+ * shape the answer (scout / strategist / judge / explainer).
+ */
+const COMMON_ASKS = `Typical asks, handled this way:
+- Portfolio review + "flag one change": sweep balances, orders, and
+  positions; name the single highest-leverage change; everything else stays put.
+- Single-asset brief (trend, momentum, levels): chart tool FIRST for that
+  asset, then marks; verdict + key levels + what would flip it.
+- Size a rotation / momentum idea: verify the source balance, read the
+  chart, simulate the exact quote, size small unless asked otherwise.
+- "Arm the crash shield / risk mode?": read the tape, concentration, and
+  open risk; answer yes or no with the trigger that would reverse it.
+- Pure questions ("what would I get", "what does X mean", "quick read"):
+  stay informational — answer directly, no forced multi-step plan; the
+  proposal is HOLD (a swap question still gets ONE illustrative candidate
+  so it can be priced).
+- Red-team of a prior plan: attack the proposal in context; if none is
+  present, attack the stated plan in the user message.`;
+
+const GROUNDED_ROLES: ReadonlySet<AgentRoleId> = new Set([
+  'scout',
+  'strategist',
+  'judge',
+  'explainer',
+]);
+
+export function systemPrompt(role: AgentRoleId, capability?: MuseCapability): string {
+  const cap = capability ? `\n\n## Desk mode\n${CAPABILITY_BRIEFS[capability]}` : '';
+  const grounding = GROUNDED_ROLES.has(role) ? `\n\n## Typical asks\n${COMMON_ASKS}` : '';
+  return `${PLAYBOOK}\n\n## Role brief\n${ROLE_BRIEFS[role]}${cap}${grounding}`;
 }
 
 /** Short stable hash of a role's full system prompt for transcript entries. */
-export function systemPromptHash(role: AgentRoleId): string {
-  return createHash('sha256').update(systemPrompt(role)).digest('hex').slice(0, 16);
+export function systemPromptHash(role: AgentRoleId, capability?: MuseCapability): string {
+  return createHash('sha256').update(systemPrompt(role, capability)).digest('hex').slice(0, 16);
 }
 
 export function finalTurnNudge(structured: boolean): string {

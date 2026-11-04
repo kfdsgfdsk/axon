@@ -145,6 +145,68 @@ describe('deterministic proposal verification', () => {
     expect(result.proposal.actions[0].type).toBe('HOLD');
   });
 
+  test('treats a recently-fetched mark as the analysis base even when settlement-stale', () => {
+    // The 3s settlement bar fires during any crew run; a mark fetched a
+    // minute ago is still a valid base for a proposal (execution re-checks
+    // fresh at placement).
+    const fetchedAMinuteAgo: PortfolioContext = {
+      ...portfolio,
+      balances: portfolio.balances.map((b) =>
+        b.tokenId === null
+          ? { ...b, markStale: true, markUpdatedAt: Date.now() - 60_000 }
+          : b
+      ),
+      staleMarks: 1,
+    };
+    const result = verifyProposal({
+      proposal: proposal([
+        swap({
+          fromTokenId: null,
+          toTokenId: 'usdc-ethereum',
+          amount: '0.1',
+          estimatedNotionalUsd: 300,
+        }),
+      ]),
+      portfolio: fetchedAMinuteAgo,
+      observations,
+      policy,
+      maxNotionalUsd: 5000,
+      markFreshMs: 300_000,
+    });
+    expect(result.problems.join(' ')).not.toMatch(/stale/);
+    expect(result.proposal.actions[0].type).toBe('MARKET_SWAP');
+  });
+
+  test('still drops sizing from a mark older than the analysis window', () => {
+    const ancient: PortfolioContext = {
+      ...portfolio,
+      balances: portfolio.balances.map((b) =>
+        b.tokenId === null
+          ? { ...b, markStale: true, markUpdatedAt: Date.now() - 3_600_000 }
+          : b
+      ),
+      staleMarks: 1,
+    };
+    const result = verifyProposal({
+      proposal: proposal([
+        swap({
+          fromTokenId: null,
+          toTokenId: 'usdc-ethereum',
+          amount: '0.1',
+          estimatedNotionalUsd: 300,
+        }),
+      ]),
+      portfolio: ancient,
+      observations,
+      policy,
+      maxNotionalUsd: 5000,
+      markFreshMs: 300_000,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.problems.join(' ')).toMatch(/stale/);
+    expect(result.proposal.actions[0].type).toBe('HOLD');
+  });
+
   test('allows selling a stablecoin without a fresh mark', () => {
     const stale: PortfolioContext = {
       ...portfolio,

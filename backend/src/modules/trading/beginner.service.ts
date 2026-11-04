@@ -26,14 +26,13 @@ import {
   creditLocked,
   normalizeTokenId,
 } from '../balances/balance.service';
-import { getToken } from '../../services/blockchain/tokenRegistry.service';
 import {
   getUsdPrice,
   getMidWithMeta,
   getPriceBatch,
-  DEFAULT_STABLE_BY_NETWORK,
-  isStableTokenId,
 } from '../../services/trading/price.service';
+import { resolveSettlementStable } from '../../services/trading/settlement';
+import { isRouteSupported } from '../../services/trading/routers';
 import {
   AppError,
   ValidationError,
@@ -102,17 +101,7 @@ export async function resolveStable(
   networkId: string,
   tokenId?: string | null
 ): Promise<{ networkId: string; tokenId: string }> {
-  const tid =
-    normalizeTokenId(tokenId) ||
-    DEFAULT_STABLE_BY_NETWORK[networkId] ||
-    '';
-  if (!tid || !isStableTokenId(tid)) {
-    throw new ValidationError(
-      'Settlement must use a stablecoin (usdc-*, usdt-*, dai-*). Pass stableTokenId.'
-    );
-  }
-  const t = await getToken(tid);
-  return { networkId: t.networkId, tokenId: tid };
+  return resolveSettlementStable(networkId, tokenId);
 }
 
 function computePnl(opts: {
@@ -163,6 +152,13 @@ export async function openPosition(input: OpenPositionInput) {
   const assetTid = normalizeTokenId(input.assetTokenId);
   const stableNet = input.stableNetworkId || input.assetNetworkId;
   const stable = await resolveStable(stableNet, input.stableTokenId);
+  // The exit leg must be routable too (the entry leg is checked by the entry
+  // swap quote): never open a position we cannot close.
+  if (!isRouteSupported(input.assetNetworkId, stable.networkId)) {
+    throw new ValidationError(
+      `No swap route from ${input.assetNetworkId} to settlement on ${stable.networkId}`
+    );
+  }
 
   // Hub mark is display-only until fill; real entry price = margin / asset received.
   const meta = await getMidWithMeta({

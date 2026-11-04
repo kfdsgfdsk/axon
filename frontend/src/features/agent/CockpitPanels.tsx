@@ -1,10 +1,12 @@
 import React from 'react';
 import { fmtPct, fmtPriceUsd, fmtUsd } from '../../lib/format';
+import { api, idemKey } from '../../lib/api';
 import { Badge, Button, Card, Empty } from '../../ui/primitives';
-import type { PricePoint } from '../../lib/types';
-import type { DebateRound, DebateTurn, DecisionRecord, CockpitRun, PolicyCheck } from './cockpit';
-import { policyChecksOf } from './cockpit';
+import type { AgentMemory, AgentThread, ExecutionReceipt, PricePoint } from '../../lib/types';
+import type { DebateRound, DebateTurn, DecisionRecord, CockpitRun, IntentBriefView, PolicyCheck } from './cockpit';
+import { capabilityTitle, confidencePartsOf, policyChecksOf } from './cockpit';
 import type { QuantBrief } from './quant';
+import { calloutColor } from './quant';
 import { QuantChart } from './QuantChart';
 
 /* ---------------- confidence meter ---------------- */
@@ -23,10 +25,28 @@ export function ConfidenceMeter({ value, small }: { value: number | null; small?
 /* ---------------- debate stream (left panel) ---------------- */
 
 function TurnCard({ turn, index }: { turn: DebateTurn; index: number }) {
-  const [open, setOpen] = React.useState(turn.side === 'red');
+  const [open, setOpen] = React.useState(turn.side === 'red' || turn.status === 'live' || turn.role === 'explainer');
   const live = turn.status === 'live';
+  const ref = React.useRef<HTMLDivElement>(null);
+  const followed = React.useRef(turn.status === 'live');
+  // Follow the debate: the live turn opens itself (tools visible as they
+  // fire) and scrolls into view once. The operator can still collapse it.
+  React.useEffect(() => {
+    if (turn.status === 'live' && !followed.current) {
+      followed.current = true;
+      setOpen(true);
+      const reduce = typeof window !== 'undefined'
+        && typeof window.matchMedia === 'function'
+        && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      ref.current?.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+    }
+    // The final word opens itself: the Explainer's full brief is the payoff.
+    if (turn.status === 'done' && followed.current && turn.role === 'explainer') {
+      setOpen(true);
+    }
+  }, [turn.status]);
   return (
-    <div className={`debate-turn side-${turn.side}${live ? ' live' : ''}`}>
+    <div ref={ref} className={`debate-turn side-${turn.side}${live ? ' live' : ''}`}>
       <button className="debate-turn-head" onClick={() => setOpen(!open)} aria-expanded={open}>
         <span className="turn-idx">{index}</span>
         <span className="turn-label">{turn.label}</span>
@@ -66,14 +86,54 @@ function TurnCard({ turn, index }: { turn: DebateTurn; index: number }) {
   );
 }
 
-export function DebateStream({ rounds, running }: { rounds: DebateRound[]; running: boolean }) {
+function fmtElapsed(startedAt: number | null | undefined, endMs: number): string | null {
+  if (!startedAt) return null;
+  const s = Math.max(0, Math.floor((endMs - startedAt) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+export function DebateStream({ rounds, running, mode, totalRoles, startedAt, endedAt, policy, intentBrief }: {
+  rounds: DebateRound[];
+  running: boolean;
+  mode?: string;
+  totalRoles?: number | null;
+  startedAt?: number | null;
+  endedAt?: number | null;
+  policy?: { decision: string; reasons: string[] } | null;
+  intentBrief?: IntentBriefView | null;
+}) {
+  // Fast crew never runs the red-team debate — label R2 skipped, never "waiting".
+  const skippedFast = (id: number) => mode === 'fast' && id === 2;
   const [collapsed, setCollapsed] = React.useState<Record<number, boolean>>({});
+  // Elapsed clock ticks while the desk deliberates; finished runs show
+  // the frozen wall time from the run record.
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    if (!running) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [running]);
   const reds = rounds.find((r) => r.id === 2)?.turns.filter((t) => t.side === 'red').length || 0;
   const vectors = rounds.flatMap((r) => r.turns).flatMap((t) => t.attackVectors);
   const openVectors = [...new Set(vectors)];
+  const doneCount = rounds.flatMap((r) => r.turns).filter((t) => t.status === 'done').length;
+  const liveCount = rounds.flatMap((r) => r.turns).filter((t) => t.status === 'live').length;
+  const elapsed = fmtElapsed(startedAt, running ? now : (endedAt || Date.now()));
+  // Every tool call across every turn, in firing order — grounding you can
+  // watch without opening a single card.
+  const firedTools = rounds.flatMap((r) => r.turns.flatMap((t) => t.tools.map((x) => ({ ...x, by: t.label }))));
+  const denied = policy?.decision === 'DENY';
+  const noTurns = doneCount + liveCount === 0;
   return (
     <div style={{ display: 'grid', gap: 10 }}>
-      {(running || openVectors.length > 0) && (
+      {denied && noTurns && (
+        <div className="deny-banner" role="alert">
+          <span className="mono" style={{ fontSize: 11, letterSpacing: '0.1em', fontWeight: 700 }}>⛔ POLICY DENY — BLOCKED BEFORE THE CREW RAN</span>
+          <span style={{ fontSize: 12.5 }}>{policy?.reasons[0] || 'The deterministic gate refused this message.'}</span>
+          <span className="mono" style={{ fontSize: 10.5, opacity: 0.85 }}>0 roles · 0 calls · 0 tokens · the cage cites itself</span>
+        </div>
+      )}
+      {(running || openVectors.length > 0 || firedTools.length > 0) && (
         <div className="tension-strip">
           <span className="mono" style={{ fontSize: 10.5, letterSpacing: '0.1em', color: 'var(--ink-faint)' }}>
             {running ? 'DEBATE LIVE' : 'DEBATE SETTLED'}
@@ -85,6 +145,46 @@ export function DebateStream({ rounds, running }: { rounds: DebateRound[]; runni
           </span>
           {openVectors.length > 0 && (
             <span className="mono" style={{ fontSize: 10.5, color: 'var(--warn)' }}>{openVectors.length} attack vectors open</span>
+          )}
+          {typeof totalRoles === 'number' && totalRoles > 0 && (
+            <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-dim)', marginLeft: 'auto' }}>
+              role {Math.min(doneCount + liveCount, totalRoles)}/{totalRoles}{elapsed ? ` · ${elapsed}` : ''}
+            </span>
+          )}
+        </div>
+      )}
+      {intentBrief && (
+        <div className="desk-read" title="The fast model restated your ask before any tool ran — intent first, tools second">
+          <span className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', color: 'var(--ink-faint)', flex: 'none' }}>
+            DESK READ · AI
+          </span>
+          <span style={{ fontSize: 12.5 }}>“{intentBrief.restated}”</span>
+          {intentBrief.assets.length > 0 && (
+            <span style={{ display: 'flex', gap: 4 }}>
+              {intentBrief.assets.map((a) => (
+                <span key={a} className="mono" style={{ fontSize: 10, color: 'var(--info)' }}>{a}</span>
+              ))}
+            </span>
+          )}
+          {intentBrief.uncertainties.length > 0 && (
+            <span className="mono" style={{ fontSize: 10.5, color: 'var(--warn)' }}>
+              open: {intentBrief.uncertainties.join(' · ')}
+            </span>
+          )}
+        </div>
+      )}
+      {firedTools.length > 0 && (
+        <div className="tool-ticker" title="Every real tool call this run, in firing order">
+          <span className="mono" style={{ fontSize: 10, letterSpacing: '0.1em', color: 'var(--ink-faint)', flex: 'none' }}>
+            TOOLS ·
+          </span>
+          {firedTools.slice(0, 14).map((t, i) => (
+            <span key={i} className={`tool-chip${t.ok === false ? ' bad' : ''}`} title={`${t.by}: ${t.detail}`}>
+              {t.ok === null ? <span className="spin" /> : t.ok ? '✓' : '✕'} {t.tool}
+            </span>
+          ))}
+          {firedTools.length > 14 && (
+            <span className="mono" style={{ fontSize: 10.5, color: 'var(--ink-faint)' }}>+{firedTools.length - 14} more</span>
           )}
         </div>
       )}
@@ -98,14 +198,14 @@ export function DebateStream({ rounds, running }: { rounds: DebateRound[]; runni
             </span>
             {r.status === 'live' && <span className="turn-live" style={{ marginLeft: 'auto' }}><span className="pulse-dot" /> STREAMING</span>}
             {r.status === 'done' && <span className="mono" style={{ marginLeft: 'auto', fontSize: 10.5, color: 'var(--up)' }}>✓ {r.turns.length} turns</span>}
-            {r.status === 'idle' && <span className="mono" style={{ marginLeft: 'auto', fontSize: 10.5, color: 'var(--ink-faint)' }}>waiting</span>}
+            {r.status === 'idle' && <span className="mono" style={{ marginLeft: 'auto', fontSize: 10.5, color: denied && noTurns ? 'var(--down)' : 'var(--ink-faint)' }}>{denied && noTurns ? 'blocked by gate' : skippedFast(r.id) ? 'skipped in fast mode' : 'waiting'}</span>}
             <span className={`chev${collapsed[r.id] ? '' : ' open'}`}>▾</span>
           </button>
           {!collapsed[r.id] && (
             <div className="round-turns">
               {r.turns.length === 0 && (
                 <div className="mono" style={{ fontSize: 11.5, color: 'var(--ink-faint)', padding: '6px 2px' }}>
-                  {r.status === 'live' ? <span className="shimmer-line" /> : 'This round has not started yet.'}
+                  {r.status === 'live' ? <span className="shimmer-line" /> : denied && noTurns ? 'Blocked by the policy gate — no specialist ran.' : skippedFast(r.id) ? 'Fast crew skips the red-team debate — switch to Deep for the full attack.' : 'This round has not started yet.'}
                 </div>
               )}
               {r.turns.map((t, i) => <TurnCard key={t.id} turn={t} index={i + 1} />)}
@@ -125,21 +225,35 @@ export function radarScoresOf(proposal: any, verification: CockpitRun['verificat
   const text = [
     ...(proposal?.risks || []),
     ...(proposal?.actions || []).map((a: any) => a.rationale || ''),
+    ...(proposal?.invalidation || []),
     proposal?.critique || '',
     ...(verification?.problems || []),
   ].join(' ').toLowerCase();
   const holdOnly = Array.isArray(proposal?.actions) && proposal.actions.length > 0 && proposal.actions.every((a: any) => a.type === 'HOLD');
-  const hit = (...words: string[]) => (words.some((w) => text.includes(w)) ? 1 : 0);
-  const scores = [
-    20 + hit('concentrat', 'exposure', 'single') * 45 + hit('correlat') * 15,
-    20 + hit('slip', 'spread', 'impact') * 45 + hit('liquid', 'depth', 'thin') * 15,
-    15 + hit('stale', 'lag') * 50,
-    15 + hit('polic', 'limit', 'cap', 'allow', 'deny') * 40,
-    20 + hit('siz', 'notional', 'too big', 'too small') * 40,
-    15 + (verification && !verification.ok ? 40 : 0) + Math.min(verification?.droppedActions || 0, 2) * 12,
+  // Intensity, not presence: count mentions per axis (capped) so different
+  // debates score differently instead of saturating every axis at once.
+  const count = (...words: string[]) => {
+    let n = 0;
+    for (const w of words) {
+      const m = text.match(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'));
+      if (m) n += m.length;
+    }
+    return n;
+  };
+  const raw = [
+    12 + Math.min(count('concentrat', 'exposure', 'single', 'correlat'), 5) * 10,
+    12 + Math.min(count('slip', 'spread', 'impact', 'liquid', 'depth', 'thin'), 5) * 10,
+    10 + Math.min(count('stale', 'lag'), 4) * 12,
+    10 + Math.min(count('polic', 'limit', 'cap', 'allow', 'deny', 'scope'), 5) * 8,
+    12 + Math.min(count('siz', 'notional', 'too big', 'too small'), 4) * 10,
+    8 + (verification && !verification.ok ? 30 : 0)
+      + Math.min(verification?.droppedActions || 0, 2) * 10
+      + Math.min(count('execut', 'replay', 'kill'), 3) * 6,
   ];
-  const damp = holdOnly ? 0.45 : 1;
-  return scores.map((s) => Math.round(Math.min(98, Math.max(8, s * damp))));
+  // A HOLD defuses execution risk most, informational axes least — never a
+  // single flat multiplier (that collapsed every run to one shape).
+  const damp = holdOnly ? [0.8, 0.8, 0.8, 0.8, 0.6, 0.4] : [1, 1, 1, 1, 1, 1];
+  return raw.map((s, i) => Math.round(Math.min(98, Math.max(8, s * damp[i]))));
 }
 
 export function RiskRadar({ proposal, verification }: { proposal: any; verification: CockpitRun['verification'] }) {
@@ -221,7 +335,7 @@ export function ImpactPreview({ proposal }: { proposal: any }) {
 
 /* ---------------- proposal panel (center) ---------------- */
 
-export function ProposalPanel({ run, dryRun, mode, working, onApprove, onVeto, onRedTeam }: {
+export function ProposalPanel({ run, dryRun, mode, working, onApprove, onVeto, onRedTeam, onExecuted }: {
   run: CockpitRun | null;
   dryRun: boolean;
   mode: string;
@@ -229,8 +343,27 @@ export function ProposalPanel({ run, dryRun, mode, working, onApprove, onVeto, o
   onApprove: () => void;
   onVeto: () => void;
   onRedTeam: () => void;
+  onExecuted?: (receipt: ExecutionReceipt) => void;
 }) {
   const p = run?.proposal;
+  const [confirming, setConfirming] = React.useState(false);
+  const [confirmText, setConfirmText] = React.useState('');
+  const [actionIndex, setActionIndex] = React.useState(0);
+  const [executing, setExecuting] = React.useState(false);
+  const [execError, setExecError] = React.useState<string | null>(null);
+  const [receipt, setReceipt] = React.useState<ExecutionReceipt | null>(null);
+  // Fresh proposal → reset the execution state (never reuse a receipt).
+  const proposalKey = p ? `${run?.actionId || ''}:${p.id}` : '';
+  const lastKey = React.useRef('');
+  if (proposalKey !== lastKey.current) {
+    lastKey.current = proposalKey;
+    if (confirming) setConfirming(false);
+    if (confirmText) setConfirmText('');
+    if (receipt) setReceipt(null);
+    if (execError) setExecError(null);
+    if (actionIndex !== 0) setActionIndex(0);
+  }
+
   if (!run) {
     return (
       <Card title="Proposal" sub="AWAITING BRIEF">
@@ -238,11 +371,54 @@ export function ProposalPanel({ run, dryRun, mode, working, onApprove, onVeto, o
       </Card>
     );
   }
+  const actions: any[] = Array.isArray(p?.actions) ? p.actions : [];
+  const executable = actions
+    .map((a, i) => ({ a, i }))
+    .filter(({ a }) => a.type !== 'HOLD');
+  const policyKind = run.policy?.decision || 'UNKNOWN';
+  const liveArmed = mode !== 'demo' && !dryRun;
+  const canExecute = liveArmed && policyKind === 'ALLOW' && executable.length > 0 && !run.running;
+  const expectedCode = p?.id ? `EXECUTE ${String(p.id).slice(-6)}` : '';
+  const picked = executable.find(({ i }) => i === actionIndex) || executable[0];
+
+  const doExecute = async () => {
+    if (!run.actionId || !picked || confirmText.trim() !== expectedCode) return;
+    setExecuting(true);
+    setExecError(null);
+    try {
+      const r = await api('/api/v1/agent/execute', {
+        method: 'POST',
+        body: {
+          actionId: run.actionId,
+          actionIndex: picked.i,
+          confirmation: confirmText.trim(),
+          idempotencyKey: idemKey(),
+        },
+      }) as ExecutionReceipt;
+      setReceipt(r);
+      setConfirming(false);
+      onExecuted?.(r);
+      // SUBMITTED orders may still be settling — one short poll for the fill.
+      if (r.status === 'SUBMITTED' || r.status === 'PENDING') {
+        setTimeout(async () => {
+          try {
+            const fresh = await api(`/api/v1/agent/executions/${r.executionId}`) as ExecutionReceipt;
+            setReceipt(fresh);
+          } catch { /* receipt stays as-is */ }
+        }, 2500);
+      }
+    } catch (e: any) {
+      setExecError(e?.message || 'Execution failed');
+    } finally {
+      setExecuting(false);
+    }
+  };
+
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <Card
         title="Proposal"
-        sub={p ? `${p.capability?.toUpperCase?.() || ''} · ${p.actions?.length || 0} ACTIONS` : run.running ? 'DEBATE IN PROGRESS' : 'NO PROPOSAL'}
+        sub={p ? `${capabilityTitle(p.capability || '').toUpperCase()} · ${p.actions?.length || 0} ACTIONS` : run.running ? 'DEBATE IN PROGRESS' : 'NO PROPOSAL'}
         action={run.confidence !== null ? <span style={{ marginLeft: 12 }}><ConfidenceMeter value={run.confidence} /></span> : undefined}
       >
         {!p ? (
@@ -252,7 +428,7 @@ export function ProposalPanel({ run, dryRun, mode, working, onApprove, onVeto, o
         ) : (
           <div className="prop-flash">
             <div className="prop-head">
-              <div className="k">{p.capability?.toUpperCase?.()} · RISK-RATED BY RED TEAM</div>
+              <div className="k">{capabilityTitle(p.capability || '').toUpperCase()} · {run.policy?.decision === 'DENY' ? 'BLOCKED BY POLICY GATE · NO CREW RAN' : run.mode === 'fast' ? 'FAST READ · RED TEAM SKIPPED' : 'RISK-RATED BY RED TEAM'}</div>
               <div className="s">{p.summary}</div>
             </div>
             <div style={{ padding: '12px 2px 0' }}>
@@ -264,13 +440,104 @@ export function ProposalPanel({ run, dryRun, mode, working, onApprove, onVeto, o
                 <ul className="prop-list">{p.assumptions.map((r: string, i: number) => <li key={i}>{r}</li>)}</ul>
               </div>
             )}
-            <div className="decision-bar">
-              <Button variant="signal" size="sm" onClick={onApprove} loading={working} disabled={run.running}>
-                {working ? 'Recording…' : dryRun || mode === 'demo' ? 'Approve simulation' : 'Approve & execute'}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={onVeto} disabled={run.running}>Veto</Button>
-              <Button size="sm" onClick={onRedTeam} disabled={run.running}>Re-attack</Button>
+            {p.invalidation?.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div className="mono" style={{ fontSize: 10.5, letterSpacing: '0.1em', color: 'var(--down)', marginBottom: 4 }}>KILL CRITERIA · WHAT WOULD INVALIDATE THIS</div>
+                <ul className="prop-list kill">{p.invalidation.map((r: string, i: number) => <li key={i}>{r}</li>)}</ul>
+              </div>
+            )}
+            <div
+              className="help-line"
+              title="A proposal is the desk's one recommended plan: sized steps, risks, and assumptions. It never executes on its own."
+            >
+              A proposal is the desk’s one recommended plan — sized steps, risks, assumptions. It never executes itself.
             </div>
+            <div className="decision-bar">
+              {liveArmed ? (
+                <Button variant="signal" size="sm" onClick={() => { setExecError(null); setConfirming(true); }} loading={working} disabled={!canExecute}
+                  title={!canExecute ? (policyKind !== 'ALLOW' ? `Policy ${policyKind} — execution locked` : executable.length === 0 ? 'HOLD-only proposal — nothing to execute' : 'Wait for the debate to finish') : 'Approve this plan, then type EXECUTE to place one real order at a time'}>
+                  Approve & execute
+                </Button>
+              ) : (
+                <Button variant="signal" size="sm" onClick={onApprove} loading={working} disabled={run.running}
+                  title="Record your approval of this dry-run. Nothing executes — the decision is pinned to your log.">
+                  {working ? 'Recording…' : 'Approve simulation'}
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" onClick={onVeto} disabled={run.running}
+                title="Reject this proposal. The desk stands down and your capital stays put.">
+                Veto
+              </Button>
+              <Button size="sm" onClick={onRedTeam} disabled={run.running}
+                title="Ask the red team for another adversarial pass on this proposal — new failure modes land in Round 2.">
+                Re-attack
+              </Button>
+            </div>
+            {liveArmed && policyKind !== 'ALLOW' && !run.running && (
+              <div className="mono" style={{ fontSize: 11, color: 'var(--warn)', marginTop: 8 }}>
+                ▲ Execution locked — policy {policyKind}. The desk can only propose until the gate issues ALLOW.
+              </div>
+            )}
+            {confirming && (
+              <div className="exec-modal">
+                <div className="mono" style={{ fontSize: 11, letterSpacing: '0.1em', color: 'var(--signal)', fontWeight: 700 }}>
+                  HUMAN CONFIRMATION — REAL ORDER
+                </div>
+                <div style={{ fontSize: 12.5, color: 'var(--ink-dim)', marginTop: 6 }}>
+                  Policy <b style={{ color: 'var(--up)' }}>{policyKind}</b> · re-verification + idempotency enforced server-side.
+                  Pick one action, then type the code exactly.
+                </div>
+                <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
+                  {executable.map(({ a, i }) => (
+                    <label key={i} className={`exec-action${picked?.i === i ? ' on' : ''}`}>
+                      <input type="radio" name="exec-action" checked={picked?.i === i} onChange={() => setActionIndex(i)} />
+                      <Badge tone={a.type === 'STOP_LOSS' ? 'down' : a.type === 'TAKE_PROFIT' ? 'up' : 'signal'}>{a.type}</Badge>
+                      <span className="mono" style={{ fontSize: 11.5 }}>
+                        {a.amount || ''} {a.fromTokenId || a.fromNetworkId || ''}{a.toTokenId || a.toNetworkId ? ` → ${a.toTokenId || a.toNetworkId}` : ''}
+                        {a.estimatedNotionalUsd !== undefined ? ` · $${Number(a.estimatedNotionalUsd).toLocaleString()}` : ''}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="mono" style={{ fontSize: 11.5, marginTop: 10 }}>
+                  Type <b style={{ color: 'var(--signal)' }}>{expectedCode}</b> to confirm
+                </div>
+                <input
+                  className="exec-confirm"
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.target.value)}
+                  placeholder={expectedCode}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {execError && <div className="mono" style={{ fontSize: 11.5, color: 'var(--down)', marginTop: 8 }}>✕ {execError}</div>}
+                <div className="decision-bar">
+                  <Button variant="signal" size="sm" onClick={doExecute} loading={executing} disabled={confirmText.trim() !== expectedCode}>
+                    {executing ? 'Placing order…' : 'Execute now'}
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={executing}>Cancel</Button>
+                </div>
+              </div>
+            )}
+            {receipt && (
+              <div className={`exec-receipt s-${receipt.status.toLowerCase()}`}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Badge tone={receipt.status === 'FILLED' ? 'up' : receipt.status === 'FAILED' ? 'down' : 'warn'}>{receipt.status}</Badge>
+                  {receipt.simulated && <Badge tone="default">SIMULATED FILL · REAL CODE PATH</Badge>}
+                  {receipt.idempotentReplay && <Badge tone="default">REPLAY · NO DOUBLE-EXEC</Badge>}
+                </div>
+                <div className="mono" style={{ fontSize: 11, marginTop: 8, display: 'grid', gap: 3 }}>
+                  <span>executed under policy <b>{receipt.policyKind}</b> with confirmation <b>{receipt.confirmationId}</b></span>
+                  <span>order <b>{receipt.orderId || '—'}</b> · execution <b>{receipt.executionId.slice(0, 8)}</b> · {receipt.actionType}</span>
+                </div>
+                {receipt.narration && (
+                  <div className="exec-narration">
+                    <span className="mono" style={{ fontSize: 10.5, letterSpacing: '0.1em', color: 'var(--signal)' }}>EXPLAINER · FILL REPORT</span>
+                    <p>{receipt.narration}</p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </Card>
@@ -297,9 +564,9 @@ export function QuantPanel({ brief, points, onDismiss }: { brief: QuantBrief; po
   const up = brief.changePct >= 0;
   return (
     <Card
-      title={`Desk chart · ${brief.symbol} / USD`}
-      sub={`${brief.windowLabel.toUpperCase()} · ${brief.patterns.length} READS · SNAPSHOT ${new Date(brief.asOf || Date.now()).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })} · ATTACHED AS EVIDENCE`}
-      action={<span style={{ marginLeft: 12 }}><Button size="sm" variant="ghost" onClick={onDismiss}>Detach</Button></span>}
+      title={`Pinned as evidence for this run · ${brief.symbol} / USD`}
+      sub={`${brief.windowLabel.toUpperCase()} · ${brief.patterns.length} READS · SNAPSHOT ${new Date(brief.asOf || Date.now()).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`}
+      action={<span style={{ marginLeft: 12 }}><Button size="sm" variant="ghost" onClick={onDismiss} title="Remove this chart from the run view (the snapshot stays in the transcript)">Dismiss</Button></span>}
     >
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 6 }}>
         <span className="mono tabular glow" style={{ fontSize: 26, fontWeight: 700 }}>{fmtPriceUsd(brief.last)}</span>
@@ -312,15 +579,23 @@ export function QuantPanel({ brief, points, onDismiss }: { brief: QuantBrief; po
       </div>
       {brief.patterns.length > 0 && (
         <div className="pattern-grid">
-          {brief.patterns.slice(0, 6).map((p, i) => (
-            <div key={i} className={`pattern-card ${p.bullish === true ? 'bull' : p.bullish === false ? 'bear' : 'neutral'}`}>
-              <span className="pattern-num">{i + 1}</span>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 12.5 }}>{p.headline}</div>
-                <div style={{ fontSize: 12, color: 'var(--ink-dim)', marginTop: 2 }}>{p.detail}</div>
+          {brief.patterns.slice(0, 6).map((p, i) => {
+            // Same distinct color as the matching chart portion.
+            const tint = calloutColor({ kind: p.kind }, i);
+            return (
+              <div
+                key={i}
+                className={`pattern-card ${p.bullish === true ? 'bull' : p.bullish === false ? 'bear' : 'neutral'}`}
+                style={{ borderLeftColor: tint }}
+              >
+                <span className="pattern-num" style={{ color: tint, borderColor: tint }}>{i + 1}</span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 12.5 }}>{p.headline}</div>
+                  <div style={{ fontSize: 12, color: 'var(--ink-dim)', marginTop: 2 }}>{p.detail}</div>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Card>
@@ -338,6 +613,15 @@ function timeAgo(ts: number): string {
 }
 
 export function RightRail({ run, log, checks }: { run: CockpitRun | null; log: DecisionRecord[]; checks: PolicyCheck[] }) {
+  const parts = run ? confidencePartsOf(run) : null;
+  const ledger = parts && run?.confidence !== null && run?.confidence !== undefined
+    ? [
+      `${parts.base} base`,
+      ...(parts.redHit > 0 ? [`−${parts.redHit} red ×${parts.redCount}`] : []),
+      ...(parts.verifyHit > 0 ? [`−${parts.verifyHit} verify`] : []),
+      ...(parts.otherHit > 0 ? [`−${parts.otherHit} faults`] : []),
+    ].join(' · ') + ` = ${run.confidence}%`
+    : null;
   return (
     <div className="stack" style={{ gap: 14 }}>
       <Card title="Run confidence" sub={run ? (run.running ? 'SCORING LIVE' : 'FINAL') : 'IDLE'}>
@@ -354,6 +638,11 @@ export function RightRail({ run, log, checks }: { run: CockpitRun | null; log: D
             <div className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)' }}>
               red objections + verification flags discount the bull case — never the reverse.
             </div>
+            {ledger && (
+              <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-faint)' }} title="Exactly how this run's score was computed">
+                {ledger}
+              </div>
+            )}
             {run.usage && (
               <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-faint)', borderTop: '1px solid var(--line-soft)', paddingTop: 8 }}>
                 {run.usage.calls} calls · {(run.usage.promptTokens + run.usage.completionTokens).toLocaleString()} tokens
@@ -365,9 +654,16 @@ export function RightRail({ run, log, checks }: { run: CockpitRun | null; log: D
       </Card>
 
       <Card title="Policy gate" sub="EVALUATED FIRST">
+        <div
+          className="help-line"
+          style={{ marginTop: 0, marginBottom: 8 }}
+          title="Deterministic code — not the model — decides whether anything may execute. ALLOW opens the gate, DRY_RUN means simulate only, DENY locks it."
+        >
+          Deterministic code, not the model, decides what may execute.
+        </div>
         <div style={{ display: 'grid', gap: 7 }}>
           {checks.map((c, i) => (
-            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5 }}>
+            <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'baseline', fontSize: 12.5 }} title={c.detail || c.label}>
               <span className="mono" style={{ color: c.pass ? 'var(--up)' : 'var(--down)', fontWeight: 700 }}>{c.pass ? '✓' : '✕'}</span>
               <span>{c.label}</span>
             </div>
@@ -390,13 +686,13 @@ export function RightRail({ run, log, checks }: { run: CockpitRun | null; log: D
         ) : (
           <div style={{ display: 'grid', gap: 8 }}>
             {log.map((d) => (
-              <div key={d.id} className="decision-row">
+              <div key={`${d.decision}:${d.id}:${d.at}`} className="decision-row">
                 <Badge tone={d.decision === 'APPROVED' || d.decision === 'COMPLETED' ? 'up' : d.decision === 'DENIED' ? 'down' : 'warn'}>
                   {d.decision}
                 </Badge>
                 <div style={{ fontSize: 12, marginTop: 4 }}>{d.goal.length > 90 ? d.goal.slice(0, 90) + '…' : d.goal}</div>
                 <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginTop: 2 }}>
-                  {d.capability} · {d.policy} · {d.confidence !== null ? `${d.confidence}% conf` : 'no score'} · {timeAgo(d.at)}
+                  {capabilityTitle(d.capability)} · {d.policy} · {d.confidence !== null ? `${d.confidence}% conf` : 'no score'} · {timeAgo(d.at)}
                 </div>
                 {d.actions.length > 0 && (
                   <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-dim)', marginTop: 2 }}>{d.actions.join(' → ')}</div>
@@ -417,13 +713,28 @@ export function EmptyCockpit({ onPlayDemo, running }: { onPlayDemo: () => void; 
     <div className="cockpit-empty">
       <div className="mono" style={{ fontSize: 11, letterSpacing: '0.14em', color: 'var(--signal)' }}>DECISION COCKPIT · STANDBY</div>
       <div style={{ fontFamily: 'var(--font-display)', fontSize: 24, fontWeight: 600, marginTop: 6 }}>
-        Brief the desk. Watch it fight itself.
+        Brief the desk. Watch it argue before it acts.
       </div>
-      <div style={{ fontSize: 13.5, color: 'var(--ink-dim)', maxWidth: 520, marginTop: 6 }}>
-        Scout builds the bull case, four red-teamers try to kill it, the judge rules — and every chart pattern becomes evidence on the record.
+      <div style={{ fontSize: 13.5, color: 'var(--ink-dim)', maxWidth: 560, marginTop: 6 }}>
+        A real crew of specialists debates your brief on the record, then the judge turns
+        the surviving argument into one concrete plan. Nothing moves without your call.
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-        <Button variant="signal" size="sm" onClick={onPlayDemo} loading={running}>Watch a 60-second run</Button>
+      <div className="empty-cols">
+        <div className="empty-col">
+          <span className="mono">01 · Debate</span>
+          <p>Each specialist argues in the open — bull case first, then the red team tries to kill it.</p>
+        </div>
+        <div className="empty-col">
+          <span className="mono">02 · Proposal &amp; risk</span>
+          <p>The judge distils the debate into one plan with sized steps, risks, and assumptions.</p>
+        </div>
+        <div className="empty-col">
+          <span className="mono">03 · Oversight</span>
+          <p>You approve, veto, or re-attack. Dry-run never executes; live still needs your confirm.</p>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <Button variant="signal" size="sm" onClick={onPlayDemo} loading={running}>Watch a guided run</Button>
       </div>
       <div className="crew-preview">
         {['Scout', 'Strategist', 'Simulator', 'Risk', 'Red ×4', 'Judge'].map((r, i) => (
@@ -431,6 +742,135 @@ export function EmptyCockpit({ onPlayDemo, running }: { onPlayDemo: () => void; 
         ))}
       </div>
     </div>
+  );
+}
+
+/* ---------------- thread strip ---------------- */
+
+export function ThreadStrip({ threads, activeId, onSelect, onNew, disabled }: {
+  threads: AgentThread[];
+  activeId: string | null;
+  onSelect: (t: AgentThread) => void;
+  onNew: () => void;
+  disabled: boolean;
+}) {
+  if (threads.length === 0) return null;
+  return (
+    <div className="thread-strip">
+      <span className="mono" style={{ fontSize: 10.5, letterSpacing: '0.1em', color: 'var(--ink-faint)', flex: 'none' }}>
+        THREADS
+      </span>
+      <div className="thread-list">
+        {threads.slice(0, 6).map((t) => (
+          <button
+            key={t.id}
+            className={`thread-chip${t.id === activeId ? ' on' : ''}`}
+            onClick={() => onSelect(t)}
+            disabled={disabled}
+            title={`${t.title} · ${t.runCount} run${t.runCount === 1 ? '' : 's'}`}
+          >
+            <span className="thread-title">{t.title.length > 34 ? t.title.slice(0, 34) + '…' : t.title}</span>
+            <span className="mono thread-count">{t.runCount}</span>
+          </button>
+        ))}
+      </div>
+      <button className="thread-new" onClick={onNew} disabled={disabled}>+ New thread</button>
+    </div>
+  );
+}
+
+/* ---------------- memory panel ---------------- */
+
+const RISKS = ['conservative', 'moderate', 'aggressive'] as const;
+
+export function MemoryPanel({ memory, onSave, saving }: {
+  memory: AgentMemory | null;
+  onSave: (patch: Partial<Pick<AgentMemory, 'riskTolerance' | 'preferredAssets' | 'notes'>>) => void;
+  saving: boolean;
+}) {
+  const [asset, setAsset] = React.useState('');
+  if (!memory) {
+    return (
+      <Card title="Desk memory" sub="LOADING">
+        <div className="mono" style={{ fontSize: 12, color: 'var(--ink-faint)' }}>Reading the desk ledger…</div>
+      </Card>
+    );
+  }
+  const addAsset = () => {
+    const v = asset.trim().toUpperCase().slice(0, 12);
+    if (!v || memory.preferredAssets.includes(v)) return;
+    onSave({ preferredAssets: [...memory.preferredAssets, v].slice(0, 20) });
+    setAsset('');
+  };
+  return (
+    <Card
+      title="Desk memory"
+      sub={`${memory.riskTolerance.toUpperCase()} · ${memory.recentDecisions.length} REMEMBERED`}
+    >
+      <div style={{ display: 'grid', gap: 10 }}>
+        <div>
+          <div className="mono" style={{ fontSize: 10.5, letterSpacing: '0.1em', color: 'var(--ink-faint)', marginBottom: 5 }}>
+            RISK TOLERANCE
+          </div>
+          <div className="risk-row">
+            {RISKS.map((r) => (
+              <button
+                key={r}
+                className={`risk-btn${memory.riskTolerance === r ? ' on' : ''}`}
+                onClick={() => memory.riskTolerance !== r && onSave({ riskTolerance: r })}
+                disabled={saving}
+              >
+                {r}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 10.5, letterSpacing: '0.1em', color: 'var(--ink-faint)', marginBottom: 5 }}>
+            WATCHED ASSETS
+          </div>
+          <div className="asset-row">
+            {memory.preferredAssets.map((a) => (
+              <button
+                key={a}
+                className="asset-chip"
+                title="Remove"
+                onClick={() => onSave({ preferredAssets: memory.preferredAssets.filter((x) => x !== a) })}
+                disabled={saving}
+              >
+                {a} <span aria-hidden>×</span>
+              </button>
+            ))}
+            <input
+              className="asset-input"
+              value={asset}
+              onChange={(e) => setAsset(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addAsset(); }}
+              placeholder="+ SOL"
+              maxLength={12}
+            />
+          </div>
+        </div>
+        {memory.recentDecisions.length > 0 && (
+          <div>
+            <div className="mono" style={{ fontSize: 10.5, letterSpacing: '0.1em', color: 'var(--ink-faint)', marginBottom: 5 }}>
+              REMEMBERED DECISIONS
+            </div>
+            <div style={{ display: 'grid', gap: 4 }}>
+              {memory.recentDecisions.slice(0, 3).map((d) => (
+                <div key={d.actionId} className="mono" style={{ fontSize: 11, color: 'var(--ink-dim)' }} title={d.goal}>
+                  · {(d.goal.length > 64 ? d.goal.slice(0, 64) + '…' : d.goal) || 'past run'}
+                  {d.actions.length > 0 && <span style={{ color: 'var(--ink-faint)' }}> [{d.actions.join(', ')}]</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-faint)' }}>
+          The crew reads this before every run. It never overrides the policy gate.
+        </div>
+      </div>
+    </Card>
   );
 }
 

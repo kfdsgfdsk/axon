@@ -7,7 +7,7 @@
  * KEY SECURITY & DESIGN CONSTRAINTS
  * ---------------------------------
  * - Muse never moves money. Even the "orders" tool is read-only.
- * - Dry-run is the default. Tools must respect scopes.
+ * - Dry-run is the default.
  * - Full audit trail: every invocation is recorded by the orchestrator.
  */
 
@@ -18,7 +18,7 @@ import { pricesTool } from './prices.tool';
 import { simulateTool } from './simulate.tool';
 import { ordersTool } from './orders.tool';
 import { ledgerTool } from './ledger.tool';
-import { ForbiddenError, ValidationError } from '../../../utils/errors';
+import { ValidationError } from '../../../utils/errors';
 
 export type ToolHandler = (
   params: Record<string, unknown>,
@@ -34,22 +34,6 @@ export const toolRegistry: Record<ToolName, ToolHandler> = {
   chart: chartTool,
 };
 
-const READ_TOOLS: ToolName[] = ['balances', 'prices', 'simulate', 'orders', 'ledger', 'chart'];
-const TRADE_TOOLS: ToolName[] = ['simulate']; // simulate is still quote-only
-
-export function assertToolScope(name: ToolName, ctx: ToolContext): void {
-  const scopes = ctx.principal.scopes;
-  if (READ_TOOLS.includes(name)) {
-    if (!scopes.includes('read') && !scopes.includes('trade')) {
-      throw new ForbiddenError(`Tool ${name} requires read or trade scope`);
-    }
-    return;
-  }
-  if (TRADE_TOOLS.includes(name) && !scopes.includes('trade') && !scopes.includes('read')) {
-    throw new ForbiddenError(`Tool ${name} requires trade or read scope`);
-  }
-}
-
 export async function executeTool(
   name: string,
   params: Record<string, unknown>,
@@ -60,7 +44,6 @@ export async function executeTool(
     throw new ValidationError(`Unknown tool: ${name}`);
   }
   const toolName = name as ToolName;
-  assertToolScope(toolName, ctx);
   const result = await toolRegistry[toolName](params || {}, ctx);
   return {
     ...result,

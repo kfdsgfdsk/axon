@@ -38,7 +38,6 @@ describe('isSecretKey', () => {
   });
 
   test.each([
-    'agentKeyId',
     'orderId',
     'networkId',
     'tokenId',
@@ -55,22 +54,19 @@ describe('isSecretKey', () => {
 });
 
 describe('redactSensitiveText', () => {
-  test('redacts agent-key secrets, bearer tokens, API keys, JWTs, private keys', () => {
+  test('redacts bearer tokens, API keys, JWTs, private keys', () => {
     const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c';
     const input = [
-      'key=ak_9f2c8d4e6b1a Idempotency-Key ok',
       'Authorization: Bearer abc123XYZ._~+/==',
       'model key sk-proj-abcdefghijklmnop here',
       `token ${jwt} end`,
       '-----BEGIN EC PRIVATE KEY-----\nMHcCAQEE\n-----END EC PRIVATE KEY-----',
     ].join('\n');
     const out = redactSensitiveText(input);
-    expect(out).not.toContain('ak_9f2c8d4e6b1a');
     expect(out).not.toContain('abc123XYZ');
     expect(out).not.toContain('sk-proj-abcdefghijklmnop');
     expect(out).not.toContain(jwt);
     expect(out).not.toContain('MHcCAQEE');
-    expect(out).toContain('[REDACTED_AGENT_KEY]');
     expect(out).toContain('Bearer [REDACTED]');
     expect(out).toContain('[REDACTED_API_KEY]');
     expect(out).toContain('[REDACTED_JWT]');
@@ -118,9 +114,9 @@ describe('capText', () => {
   });
 
   test('redacts secrets inside capped text', () => {
-    const { text } = capText('leaked ak_deadbeef1234 ok', 100);
-    expect(text).not.toContain('ak_deadbeef1234');
-    expect(text).toContain('[REDACTED_AGENT_KEY]');
+    const { text } = capText('leaked Bearer abc123XYZ ok', 100);
+    expect(text).not.toContain('abc123XYZ');
+    expect(text).toContain('Bearer [REDACTED]');
   });
 });
 

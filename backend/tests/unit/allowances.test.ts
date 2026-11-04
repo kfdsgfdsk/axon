@@ -7,11 +7,13 @@
  */
 import {
   allowanceCapAtomic,
+  isUnfundedError,
   needsTopup,
   parseAllowanceList,
   planTopups,
   routersForNetwork,
   runTopupJob,
+  shortTopupError,
   type AllowanceToken,
 } from '../../src/services/signer/allowances';
 import { LIFI_DIAMOND } from '../../src/services/trading/lifi.client';
@@ -129,5 +131,36 @@ describe('runTopupJob', () => {
     });
     expect(skipped.topped).toBe(false);
     expect(approve2).not.toHaveBeenCalled();
+  });
+});
+
+describe('unfunded-wallet handling', () => {
+  const ethersInsufficient = Object.assign(
+    new Error(
+      'insufficient funds for intrinsic transaction cost ' +
+        '(transaction="0x02f8ad82a4b1deadbeef", info={"error":{"code":-32000}}, ' +
+        'code=INSUFFICIENT_FUNDS, version=6.17.0)'
+    ),
+    { code: 'INSUFFICIENT_FUNDS', shortMessage: 'insufficient funds for intrinsic transaction cost' }
+  );
+
+  test('detects INSUFFICIENT_FUNDS by code or message', () => {
+    expect(isUnfundedError(ethersInsufficient)).toBe(true);
+    expect(isUnfundedError({ code: 'INSUFFICIENT_FUNDS' })).toBe(true);
+    expect(isUnfundedError(new Error('insufficient funds for gas * price + value'))).toBe(true);
+    expect(isUnfundedError(new Error('approve build failed'))).toBe(false);
+    expect(isUnfundedError(null)).toBe(false);
+  });
+
+  test('log line keeps the human reason, drops the signed-tx blob', () => {
+    const short = shortTopupError(ethersInsufficient);
+    expect(short).toBe('insufficient funds for intrinsic transaction cost');
+    expect(short).not.toMatch(/0x02f8ad/);
+    // No shortMessage (plain Error): cut at the transaction blob, cap length.
+    const plain = shortTopupError(
+      new Error('boom ' + '(transaction="0x' + 'ab'.repeat(200) + '")')
+    );
+    expect(plain).toBe('boom');
+    expect(shortTopupError(new Error('x'.repeat(500)))).toHaveLength(201);
   });
 });

@@ -45,6 +45,22 @@ export async function changePassword(req: Request, res: Response, next: NextFunc
   }
 }
 
+export async function changeEmail(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!req.user) throw new UnauthorizedError();
+    const schema = z.object({
+      currentPassword: z.string().min(8).max(128),
+      newEmail: z.string().email().max(254),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError('Invalid email payload');
+    const data = await users.changeEmail(req.user.id, parsed.data.currentPassword, parsed.data.newEmail);
+    res.json({ success: true, data, message: 'Email changed. Please verify the new address.' });
+  } catch (e) {
+    next(e);
+  }
+}
+
 export async function forgotPassword(req: Request, res: Response, next: NextFunction) {
   try {
     const schema = z.object({ email: z.string().email() });
@@ -75,7 +91,12 @@ export async function resetPassword(req: Request, res: Response, next: NextFunct
 export async function requestEmailVerify(req: Request, res: Response, next: NextFunction) {
   try {
     if (!req.user) throw new UnauthorizedError();
-    const data = await users.requestEmailVerification(req.user.id);
+    const schema = z.object({ demo: z.boolean().optional() });
+    const parsed = schema.safeParse(req.body ?? {});
+    if (!parsed.success) throw new ValidationError('Invalid payload');
+    const data = await users.requestEmailVerification(req.user.id, {
+      demo: parsed.data.demo,
+    });
     res.json({ success: true, data, message: data.sent ? 'Verification email sent' : 'Already verified' });
   } catch (e) {
     next(e);
