@@ -172,6 +172,46 @@
   font-size: 12px; color: var(--ink-dim); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
 }
+
+/* run brief: the operator's own words, pinned full-width above the cockpit.
+ * Display type matches proposal summaries; badges reuse the global tones —
+ * signal for the chosen depth, info for the crew mode. */
+.run-brief { margin: 0; display: grid; gap: 10px; }
+.run-brief-text {
+  margin: 0; padding: 0;
+  font-family: var(--font-display); font-size: 17px; font-weight: 600; line-height: 1.45;
+  color: var(--ink); overflow-wrap: anywhere;
+}
+.run-brief-badges { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+/* routing legend: the two axes behind the AUTO badges — depth (what the
+ * desk does) vs crew (how many roles debate). Rows reuse the thread-chip
+ * selected language: signal border + signal name on the current row. */
+.routing-legend {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  border-top: 1px solid var(--line-soft); margin-top: 12px; padding-top: 12px;
+}
+@media (max-width: 900px) { .routing-legend { grid-template-columns: 1fr; } }
+.routing-axis { display: grid; gap: 6px; align-content: start; }
+.routing-axis-title { font-size: 10.5px; letter-spacing: 0.1em; color: var(--ink-faint); }
+.routing-row {
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-2); padding: 6px 10px;
+  display: flex; gap: 8px; align-items: baseline;
+}
+.routing-row .routing-name { font-size: 12.5px; font-weight: 700; flex: none; }
+.routing-row .routing-desc { font-size: 12px; color: var(--ink-dim); }
+.routing-row.on { border-color: var(--signal); }
+.routing-row.on .routing-name { color: var(--signal); }
+.routing-foot { font-size: 10.5px; color: var(--ink-faint); }
+.routing-roles { grid-column: 1 / -1; }
+.routing-role-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+@media (max-width: 900px) { .routing-role-grid { grid-template-columns: 1fr; } }
+.routing-num {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  width: 20px; height: 20px; display: grid; place-items: center; flex: none;
+  border: 1px solid var(--line); border-radius: 50%; color: var(--ink-dim);
+}
 @media (max-width: 1250px) { .cockpit-grid { grid-template-columns: 1fr 1fr; } .cockpit-grid .col-oversight { grid-column: 1 / -1; } }
 @media (max-width: 900px) {
   .cockpit-grid { grid-template-columns: 1fr; }

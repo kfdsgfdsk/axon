@@ -211,23 +211,31 @@ function mentionIndex(haystack: string, needle: string): number {
   return m && m.index !== undefined ? m.index : -1;
 }
 
+/** Chain preference for a symbol listed on several chains: held, then ethereum, then alphabetical. */
+function rankCatalogEntry(e: RouterCatalogEntry, held: Set<string>): number {
+  return (held.has(e.asset.toLowerCase()) ? 0 : 10) + (e.networkId === 'ethereum' ? 0 : 1);
+}
+
 /**
- * Resolve which asset a chart question is about. Catalog-driven when a
- * catalog is provided (every supported token, not just the legacy map):
- * earliest mention wins; a symbol listed on several chains prefers the
- * chain the user holds, then ethereum, then alphabetical. Falls back to
- * the legacy map when the catalog hasn't loaded yet.
+ * Resolve which assets a chart question is about, earliest mention first.
+ * One entry per symbol: a symbol listed on several chains resolves once
+ * (held chain, then ethereum, then alphabetical), so "ETH chart" pins one
+ * chart, while "SOL vs ETH" pins two. Hard-capped at 2 — the desk shows
+ * both charts for a two-asset question, and never more. Falls back to the
+ * legacy map when the catalog hasn't loaded yet.
  */
-export function assetFromMessage(
+export function assetsFromMessage(
   message: string,
   fallback: string,
   catalog?: RouterCatalogEntry[],
   heldKeys?: string[],
-): string {
+  max = 2,
+): string[] {
+  const limit = Math.max(1, Math.min(max, 2));
   const up = message.toUpperCase();
   if (catalog && catalog.length > 0) {
     const held = new Set((heldKeys || []).map((k) => k.toLowerCase()));
-    const hits: { idx: number; entry: RouterCatalogEntry }[] = [];
+    const best = new Map<string, { idx: number; entry: RouterCatalogEntry }>();
     for (const e of catalog) {
       const sym = (e.symbol || '').toUpperCase();
       let idx = mentionIndex(up, sym);
@@ -237,24 +245,47 @@ export function assetFromMessage(
         const nm = (e.name || '').toUpperCase();
         if (nm.length >= 5) idx = mentionIndex(up, nm);
       }
-      if (idx !== -1) hits.push({ idx, entry: e });
+      if (idx === -1) continue;
+      const cur = best.get(sym);
+      if (!cur || idx < cur.idx ||
+        (idx === cur.idx && rankCatalogEntry(e, held) < rankCatalogEntry(cur.entry, held))) {
+        best.set(sym, { idx, entry: e });
+      }
     }
-    if (hits.length > 0) {
-      hits.sort((a, b) => a.idx - b.idx);
-      const tied = hits.filter((h) => h.idx === hits[0].idx);
-      const rank = (e: RouterCatalogEntry) =>
-        (held.has(e.asset.toLowerCase()) ? 0 : 10) + (e.networkId === 'ethereum' ? 0 : 1);
-      tied.sort((a, b) =>
-        rank(a.entry) - rank(b.entry) || (a.entry.asset < b.entry.asset ? -1 : 1),
-      );
-      return tied[0].entry.asset;
+    if (best.size > 0) {
+      return [...best.values()]
+        .sort((a, b) =>
+          a.idx - b.idx ||
+          rankCatalogEntry(a.entry, held) - rankCatalogEntry(b.entry, held) ||
+          (a.entry.asset < b.entry.asset ? -1 : 1))
+        .slice(0, limit)
+        .map((h) => h.entry.asset);
     }
-    return fallback;
+    return [fallback];
   }
+  const found: { idx: number; id: string }[] = [];
   for (const [sym, id] of Object.entries(SYM_MAP)) {
-    if (new RegExp(`\\b${sym}\\b`).test(up)) return id;
+    const m = up.match(new RegExp(`\\b${sym}\\b`));
+    if (m && m.index !== undefined && !found.some((f) => f.id === id)) {
+      found.push({ idx: m.index, id });
+    }
   }
-  return fallback;
+  found.sort((a, b) => a.idx - b.idx);
+  if (found.length > 0) return found.slice(0, limit).map((f) => f.id);
+  return [fallback];
+}
+
+/**
+ * Resolve which asset a chart question is about: earliest mention wins.
+ * Single-asset shorthand over assetsFromMessage.
+ */
+export function assetFromMessage(
+  message: string,
+  fallback: string,
+  catalog?: RouterCatalogEntry[],
+  heldKeys?: string[],
+): string {
+  return assetsFromMessage(message, fallback, catalog, heldKeys, 1)[0];
 }
 
 /* ---------------- detectors ---------------- */

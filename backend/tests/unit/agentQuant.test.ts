@@ -1,5 +1,5 @@
 import {
-  allocationFlags, assetFromMessage, buildQuantBrief, calloutColor, wantsQuant,
+  allocationFlags, assetFromMessage, assetsFromMessage, buildQuantBrief, calloutColor, wantsQuant,
 } from '../../../frontend/src/features/agent/quant';
 import type { PricePoint } from '../../../frontend/src/lib/types';
 
@@ -37,6 +37,28 @@ describe('quant triggers', () => {
     expect(wantsQuant("let's chat about fees")).toBe(false);
     expect(wantsQuant('what are the withdrawal fees?')).toBe(false);
     expect(wantsQuant('character of the market today?')).toBe(false);
+  });
+
+  test('two-asset question resolves both in mention order, never more', () => {
+    expect(assetsFromMessage('SOL vs ETH chart?', 'ethereum')).toEqual(['solana', 'ethereum']);
+    expect(assetsFromMessage('compare BTC and SOL charts', 'ethereum')).toEqual(['bitcoin', 'solana']);
+    // Three mentions still pin exactly two charts.
+    expect(assetsFromMessage('BTC vs SOL vs ETH charts', 'ethereum')).toEqual(['bitcoin', 'solana']);
+    expect(assetsFromMessage('the chart looks strong', 'solana')).toEqual(['solana']);
+  });
+
+  test('one symbol on several chains resolves once, preferring held then ethereum', () => {
+    const catalog = [
+      { asset: 'arbitrum', symbol: 'ETH', name: 'Ethereum', networkId: 'arbitrum' },
+      { asset: 'ethereum', symbol: 'ETH', name: 'Ethereum', networkId: 'ethereum' },
+      { asset: 'solana', symbol: 'SOL', name: 'Solana', networkId: 'solana' },
+    ];
+    // Same symbol, one chart — ethereum wins without holdings.
+    expect(assetsFromMessage('ETH chart?', 'solana', catalog, [])).toEqual(['ethereum']);
+    // Held chain wins over ethereum.
+    expect(assetsFromMessage('ETH chart?', 'solana', catalog, ['arbitrum'])).toEqual(['arbitrum']);
+    // Two distinct symbols pin two charts in mention order.
+    expect(assetsFromMessage('SOL vs ETH momentum?', 'bitcoin', catalog, [])).toEqual(['solana', 'ethereum']);
   });
 });
 

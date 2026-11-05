@@ -10,7 +10,7 @@ import { IconPlay, IconStop } from '../../ui/icons';
 import type { AgentMemory, AgentThread, CrewEvent, PricePoint } from '../../lib/types';
 import {
   appendDecisionLog, decideRun, freshRun, loadDecisionLog, recordFromRun,
-  reduceCockpit, capabilityTitle,
+  reduceCockpit,
   type CockpitRun, type DecisionRecord,
 } from './cockpit';
 import {
@@ -18,8 +18,8 @@ import {
   type BusEvent, type LiveRunRecord,
 } from './runBus';
 import { isTerminalStatus, runFromTimeline } from './reattach';
-import { assetFromMessage, buildQuantBrief, wantsQuant, type QuantBrief } from './quant';
-import { DebateStream, EmptyCockpit, MemoryPanel, ProposalPanel, QuantPanel, RightRail, ThreadStrip, policyChecksOf } from './CockpitPanels';
+import { assetsFromMessage, buildQuantBrief, wantsQuant, type QuantBrief } from './quant';
+import { DebateStream, EmptyCockpit, MemoryPanel, ProposalPanel, QuantPanel, RightRail, RunBrief, ThreadStrip, policyChecksOf } from './CockpitPanels';
 import './agent.css';
 
 // No suggestion chips, no mode picker: the operator writes a plain brief and
@@ -37,11 +37,12 @@ export function AgentPage() {
   const [run, setRun] = React.useState<CockpitRun | null>(null);
   const [log, setLog] = React.useState<DecisionRecord[]>(() => loadDecisionLog());
   const [working, setWorking] = React.useState(false);
-  const [quantAsset, setQuantAsset] = React.useState('ethereum');
-  const [brief, setBrief] = React.useState<QuantBrief | null>(null);
-  const [briefPoints, setBriefPoints] = React.useState<PricePoint[]>([]);
-  const [briefKey, setBriefKey] = React.useState('');
-  const [quantDetached, setQuantDetached] = React.useState(false);
+  // Up to two pinned chart assets: a two-asset question shows both tapes,
+  // and a mid-run chart tool call appends instead of overriding the first.
+  const [quantAssets, setQuantAssets] = React.useState<string[]>([]);
+  const [briefs, setBriefs] = React.useState<{ asset: string; brief: QuantBrief; points: PricePoint[] }[]>([]);
+  const [briefKeys, setBriefKeys] = React.useState<string[]>([]);
+  const [quantDismissed, setQuantDismissed] = React.useState<string[]>([]);
   // Set when the crew itself fires the chart tool mid-run: the tape the
   // debate actually read gets pinned even if the brief never said "chart".
   const [quantSignal, setQuantSignal] = React.useState(false);
@@ -59,7 +60,8 @@ export function AgentPage() {
   const runRef = React.useRef<(text?: string) => void>(() => {});
 
   const running = !!run?.running;
-  const { points: quantPoints } = useHistory(quantAsset, '24h');
+  const { points: quantPointsA } = useHistory(quantAssets[0] ?? '', '24h');
+  const { points: quantPointsB } = useHistory(quantAssets[1] ?? '', '24h');
   const { rows: pfRows, equity } = usePortfolio();
   const { assets: tradeAssets } = useSupportedAssets();
   // Demo runs the same real crew as live — always forced to dry-run.
@@ -109,31 +111,35 @@ export function AgentPage() {
   }, []);
 
   // Quant pre-pass: when the goal mentions charts/patterns — or the crew
-  // itself fires the chart tool — the desk reads the tape and pins the
-  // brief as evidence. Built once per run.
+  // itself fires the chart tool — the desk reads the tape and pins one
+  // brief per asset as evidence. Built once per run per asset; dismissed
+  // charts stay dismissed.
   React.useEffect(() => {
-    if (!run || (!wantsQuant(run.goal) && !quantSignal) || quantDetached) return;
-    const key = `${run.startedAt}|${quantAsset}`;
-    if (key === briefKey || quantPoints.length < 30) return;
+    if (!run || (!wantsQuant(run.goal) && !quantSignal)) return;
     const mentionAllocation = /allocat|portfolio mix|equity curve|concentrat/i.test(run.goal);
     const slices = pfRows
       .filter((r) => r.value > 0 && equity > 0)
       .map((r) => ({ label: symbolOf(r.networkId, r.tokenId || null), weight: (r.value / equity) * 100 }));
-    const b = buildQuantBrief({
-      asset: quantAsset,
-      symbol: symbolOf(quantAsset.startsWith('token:') ? quantAsset.slice(6).split('-').pop() || '' : quantAsset, quantAsset.startsWith('token:') ? quantAsset.slice(6) : null),
-      windowLabel: '24h',
-      points: quantPoints,
-      portfolio: slices,
-      mentionAllocation,
+    const series = [quantPointsA, quantPointsB];
+    quantAssets.slice(0, 2).forEach((asset, i) => {
+      const key = `${run.startedAt}|${asset}`;
+      const points = series[i] || [];
+      if (points.length < 30 || briefKeys.includes(key) || quantDismissed.includes(asset)) return;
+      const b = buildQuantBrief({
+        asset,
+        symbol: symbolOf(asset.startsWith('token:') ? asset.slice(6).split('-').pop() || '' : asset, asset.startsWith('token:') ? asset.slice(6) : null),
+        windowLabel: '24h',
+        points,
+        portfolio: slices,
+        mentionAllocation,
+      });
+      if (b) {
+        setBriefs((prev) => (prev.some((e) => e.asset === asset) ? prev : [...prev, { asset, brief: b, points }].slice(0, 2)));
+        setBriefKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+      }
     });
-    if (b) {
-      setBrief(b);
-      setBriefPoints(quantPoints);
-      setBriefKey(key);
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [run, quantAsset, quantPoints, quantDetached, quantSignal, briefKey]);
+  }, [run, quantAssets, quantPointsA, quantPointsB, quantDismissed, quantSignal, briefKeys]);
 
   const stop = (silent = false) => {
     // Explicit Stop only — unmounting the page detaches the listener (see
@@ -158,7 +164,7 @@ export function AgentPage() {
         if (hit) asset = hit.asset;
       }
       if (asset) {
-        setQuantAsset(asset);
+        setQuantAssets((prev) => (prev.includes(asset) ? prev : [...prev, asset].slice(0, 2)));
         setQuantSignal(true);
       }
     }
@@ -263,15 +269,16 @@ export function AgentPage() {
     if (!message || running) return;
     stop(true);
     setPrompt('');
-    setBrief(null);
-    setBriefPoints([]);
-    setBriefKey('');
-    setQuantDetached(false);
+    setBriefs([]);
+    setBriefKeys([]);
+    setQuantDismissed([]);
     setQuantSignal(false);
     if (wantsQuant(message)) {
       const top = [...pfRows].sort((a, b) => b.value - a.value)[0];
       const topId = top ? (top.tokenId ? `token:${top.tokenId}` : top.networkId) : 'ethereum';
-      setQuantAsset(assetFromMessage(message, topId, tradeAssets, pfRows.map((r) => r.key)));
+      setQuantAssets(assetsFromMessage(message, topId, tradeAssets, pfRows.map((r) => r.key)));
+    } else {
+      setQuantAssets([]);
     }
     // Follow-up when a thread is armed: same thread, parent = last run.
     // The crew then skips Scout and refines the previous proposal.
@@ -334,21 +341,21 @@ export function AgentPage() {
     stop(true);
     setContinueThread(null);
     setRun(null);
-    setBrief(null);
-    setBriefPoints([]);
-    setBriefKey('');
-    setQuantDetached(false);
+    setBriefs([]);
+    setBriefKeys([]);
+    setQuantAssets([]);
+    setQuantDismissed([]);
     setQuantSignal(false);
   };
 
   const selectThread = (t: AgentThread) => {
     if (running) return;
-    // Arming another thread drops this run's pinned chart — evidence must
+    // Arming another thread drops this run's pinned charts — evidence must
     // never leak across threads.
-    setBrief(null);
-    setBriefPoints([]);
-    setBriefKey('');
-    setQuantDetached(false);
+    setBriefs([]);
+    setBriefKeys([]);
+    setQuantAssets([]);
+    setQuantDismissed([]);
     setQuantSignal(false);
     setContinueThread({ threadId: t.id, parentActionId: t.lastActionId, title: t.title });
     push('info', t.lastActionId ? `Continuing “${t.title}” — next brief refines the last run` : `Thread “${t.title}” armed`);
@@ -416,7 +423,11 @@ export function AgentPage() {
   };
 
   const h = health.data;
-  const showQuant = brief !== null && !quantDetached;
+
+  const dismissBrief = (asset: string) => {
+    setBriefs((prev) => prev.filter((e) => e.asset !== asset));
+    setQuantDismissed((prev) => (prev.includes(asset) ? prev : [...prev, asset]));
+  };
 
   return (
     <div className="cockpit-page">
@@ -514,10 +525,13 @@ export function AgentPage() {
         </div>
       </Card>
 
-      {/* ------- quant evidence (first-class, full width) ------- */}
-      {showQuant && brief && (
-        <QuantPanel brief={brief} points={briefPoints} onDismiss={() => { setQuantDetached(true); setBrief(null); }} />
-      )}
+      {/* ------- your brief (pinned above everything the run produced) ------- */}
+      {run && <RunBrief run={run} />}
+
+      {/* ------- quant evidence (first-class, full width; two-asset asks pin both tapes) ------- */}
+      {briefs.map((e) => (
+        <QuantPanel key={e.asset} brief={e.brief} points={e.points} onDismiss={() => dismissBrief(e.asset)} />
+      ))}
 
       {/* ------- the cockpit ------- */}
       {!run ? (
@@ -527,13 +541,6 @@ export function AgentPage() {
           <div className="cockpit-col col-debate">
             <div className="cockpit-col-head">
               <span className="mono">01 · LIVE DEBATE</span>
-              {run.capability && run.capability !== 'auto'
-                ? <span style={{ justifySelf: 'start' }} title="Depth the desk chose from your brief"><Badge tone="signal">AUTO · {capabilityTitle(run.capability).toUpperCase()}</Badge></span>
-                : null}
-              {run.followUp
-                ? <span style={{ justifySelf: 'start' }}><Badge tone="signal">FOLLOW-UP · SCOUT SKIPPED</Badge></span>
-                : run.threadId ? <span style={{ justifySelf: 'start' }}><Badge tone="default">THREAD · NEW RUN</Badge></span> : null}
-              <span className="goal-line" title={run.goal}>{run.goal}</span>
             </div>
             <DebateStream
               rounds={run.rounds}

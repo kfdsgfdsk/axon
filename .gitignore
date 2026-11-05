@@ -2,6 +2,9 @@ node_modules/
 dist/
 .env
 .env.*
+# ...except documented examples (no secrets in them — safe to commit)
+!.env.agent.example
+!frontend/.env.example
 logs/
 *.log
 coverage/

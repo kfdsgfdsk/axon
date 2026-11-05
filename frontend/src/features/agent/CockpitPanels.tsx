@@ -4,7 +4,7 @@ import { api, idemKey } from '../../lib/api';
 import { Badge, Button, Card, Empty } from '../../ui/primitives';
 import type { AgentMemory, AgentThread, ExecutionReceipt, PricePoint } from '../../lib/types';
 import type { DebateRound, DebateTurn, DecisionRecord, CockpitRun, IntentBriefView, PolicyCheck } from './cockpit';
-import { capabilityTitle, confidencePartsOf, policyChecksOf } from './cockpit';
+import { CAPABILITY_META, capabilityTitle, confidencePartsOf, policyChecksOf } from './cockpit';
 import type { QuantBrief } from './quant';
 import { calloutColor } from './quant';
 import { QuantChart } from './QuantChart';
@@ -19,6 +19,107 @@ export function ConfidenceMeter({ value, small }: { value: number | null; small?
       <span className="conf-bar"><span className="conf-fill" style={{ width: `${value}%`, background: tone, boxShadow: `0 0 8px ${tone}` }} /></span>
       <span className="mono" style={{ fontSize: small ? 10.5 : 11.5, color: tone, fontWeight: 700 }}>{value}%</span>
     </span>
+  );
+}
+
+/* ---------------- run brief (operator input + chosen depth/mode) ---------------- */
+
+const DEPTH_BLURB: Record<string, string> = {
+  reactive: 'Answer it. Never a plan.',
+  copilot: 'Sweep the book + markets.',
+  plan: 'Goal into smallest safe steps.',
+  strategy: 'Verdict with evidence.',
+  critique: 'Attack the plan.',
+};
+
+/** Deep-crew run order with one line per role. Labels mirror ROLE_META. */
+const ROLE_BLURBS: { role: string; label: string; blurb: string }[] = [
+  { role: 'scout', label: 'Scout', blurb: 'Gathers facts through tools.' },
+  { role: 'strategist', label: 'Strategist', blurb: 'Drafts the multi-step plan.' },
+  { role: 'simulator', label: 'Simulator', blurb: 'Prices swaps: payout, worst case, fee.' },
+  { role: 'risk', label: 'Risk desk', blurb: 'Checks gates, concentration, stale marks.' },
+  { role: 'red_slippage', label: 'Red · Slippage', blurb: 'Attacks price impact.' },
+  { role: 'red_concentration', label: 'Red · Concentration', blurb: 'Attacks exposure.' },
+  { role: 'red_stale', label: 'Red · Stale marks', blurb: 'Attacks stale prices.' },
+  { role: 'red_policy', label: 'Red · Policy', blurb: 'Attacks limits and scope.' },
+  { role: 'judge', label: 'Judge', blurb: 'Rules and writes the final plan.' },
+  { role: 'explainer', label: 'Explainer', blurb: 'Briefs you in plain words.' },
+];
+
+export function RunBrief({ run }: { run: CockpitRun }) {
+  const [legendOpen, setLegendOpen] = React.useState(false);
+  const depthKnown = !!run.capability && run.capability !== 'auto';
+  const deep = run.mode !== 'fast';
+  return (
+    <Card title="Your brief" sub="OPERATOR INPUT · PINNED TO THIS RUN">
+      <figure className="run-brief">
+        <blockquote className="run-brief-text">{run.goal}</blockquote>
+        <figcaption className="run-brief-badges" aria-label="Depth and crew mode chosen for this run">
+          {depthKnown ? (
+            <span title="Depth the desk chose from your brief">
+              <Badge tone="signal">AUTO · {capabilityTitle(run.capability).toUpperCase()}</Badge>
+            </span>
+          ) : (
+            <Badge tone="default">AUTO · READING BRIEF…</Badge>
+          )}
+          <span title={deep ? 'Deep: all roles debate, slower but thorough' : 'Fast: fewer roles, a quicker read without the full red-team debate'}>
+            <Badge tone="info">
+              {deep ? 'DEEP CREW' : 'FAST CREW'}
+              {typeof run.totalRoles === 'number' && run.totalRoles > 0 ? ` · ${run.totalRoles} ROLES` : ''}
+            </Badge>
+          </span>
+          {run.followUp
+            ? <Badge tone="signal">FOLLOW-UP · SCOUT SKIPPED</Badge>
+            : run.threadId ? <Badge tone="default">THREAD · NEW RUN</Badge> : null}
+          <button
+            className="thread-new"
+            aria-expanded={legendOpen}
+            aria-controls="routing-legend"
+            onClick={() => setLegendOpen(!legendOpen)}
+            title="Two axes chose this run: depth (what the desk does) and crew (how many roles debate)"
+          >
+            Why this routing? <span className={`chev${legendOpen ? ' open' : ''}`}>▾</span>
+          </button>
+        </figcaption>
+      </figure>
+      {legendOpen && (
+        <div className="routing-legend" id="routing-legend">
+          <div className="routing-axis">
+            <span className="mono routing-axis-title">MODES · WHAT THE DESK DOES</span>
+            {CAPABILITY_META.map((c) => (
+              <div key={c.id} className={`routing-row${depthKnown && run.capability === c.id ? ' on' : ''}`}>
+                <span className="routing-name">{c.title}</span>
+                <span className="routing-desc">{DEPTH_BLURB[c.id] || c.desc}</span>
+              </div>
+            ))}
+          </div>
+          <div className="routing-axis">
+            <span className="mono routing-axis-title">CREW · HOW MANY DEBATE</span>
+            <div className={`routing-row${deep ? ' on' : ''}`}>
+              <span className="routing-name">Deep · 10</span>
+              <span className="routing-desc">Full debate with red team. 9 on follow-ups.</span>
+            </div>
+            <div className={`routing-row${!deep ? ' on' : ''}`}>
+              <span className="routing-name">Fast · 5</span>
+              <span className="routing-desc">No risk desk, no red round. 4 on follow-ups.</span>
+            </div>
+            <span className="mono routing-foot">QUICK TAKE → FAST · FOLLOW-UPS SKIP SCOUT</span>
+          </div>
+          <div className="routing-axis routing-roles">
+            <span className="mono routing-axis-title">ROLES · WHAT EACH ONE DOES</span>
+            <div className="routing-role-grid">
+              {ROLE_BLURBS.map((r, i) => (
+                <div key={r.role} className="routing-row">
+                  <span className="routing-num">{i + 1}</span>
+                  <span className="routing-name">{r.label}</span>
+                  <span className="routing-desc">{r.blurb}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

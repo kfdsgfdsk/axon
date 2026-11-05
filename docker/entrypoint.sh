@@ -47,16 +47,21 @@ load_persisted() {
   fi
 }
 
+gen_secret() {
+  # $1 = byte length (hex output is 2x). Node crypto only — no openssl CLI.
+  node -e "console.log(require('crypto').randomBytes($1).toString('hex'))"
+}
+
 ensure_secret() {
-  # $1=name, $2=byte length for openssl (hex output is 2x)
+  # $1=name, $2=byte length for gen_secret (hex output is 2x)
   local name="$1" nbytes="$2" val from_env=0
   if [ -n "${!name:-}" ]; then from_env=1; fi
   load_persisted "$name"
   val="${!name:-}"
   if [ -z "$val" ]; then
-    val="$(openssl rand -hex "$nbytes")"
+    val="$(gen_secret "$nbytes")"
     export "$name=$val"
-    log "$name generated (persisted in /data/secrets.env)"
+    log "$name generated with node crypto (persisted in /data/secrets.env)"
   elif [ "$from_env" = "1" ]; then
     log "$name provided via container environment"
   else
@@ -76,6 +81,7 @@ ensure_secret WALLET_ENCRYPTION_KEY 32
 ensure_secret SIGNER_SHARED_SECRET 32
 ensure_secret APPROVAL_SHARED_SECRET 32
 ensure_secret APPROVAL_ED25519_PRIVATE_KEY 32
+ensure_secret POSTGRES_PASSWORD 24
 
 # IMPORTANT: WALLET_ENCRYPTION_KEY + Postgres must stay in sync. Both live in
 # /data, so keep using the same volume across restarts or the vault cannot be
